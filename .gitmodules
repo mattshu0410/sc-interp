@@ -7,3 +7,6 @@
 [submodule "models/scgpt"]
 	path = models/scgpt
 	url = https://github.com/bowang-lab/scGPT.git
+[submodule "models/gears"]
+	path = models/gears
+	url = https://github.com/snap-stanford/GEARS.git
