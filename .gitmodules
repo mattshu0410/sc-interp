@@ -1,0 +1,6 @@
+[submodule "models/scldm"]
+	path = models/scldm
+	url = https://github.com/czi-ai/scLDM.git
+[submodule "models/cellflow"]
+	path = models/cellflow
+	url = https://github.com/theislab/cellflow.git

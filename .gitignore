@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Data (download separately)
+data/*
+!data/.gitkeep
+!data/*.sh
+
+# Model artifacts (downloaded via setup scripts)
+_artifacts/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
