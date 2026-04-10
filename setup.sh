@@ -7,6 +7,30 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
+# ── Check / install NVIDIA driver ────────────────────────────────────────────
+# We need driver >= 580 for CUDA 13 (jax[cuda13], current PyTorch, etc).
+# This step requires a reboot, so if we install we exit and ask the user
+# to reboot then re-run.
+MIN_DRIVER_MAJOR=580
+if command -v nvidia-smi &>/dev/null; then
+    DRIVER_MAJOR=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d. -f1)
+    if [ -n "$DRIVER_MAJOR" ] && [ "$DRIVER_MAJOR" -lt "$MIN_DRIVER_MAJOR" ]; then
+        echo "==> NVIDIA driver $DRIVER_MAJOR is older than $MIN_DRIVER_MAJOR, upgrading..."
+        sudo apt update -qq
+        sudo apt install -y "nvidia-driver-${MIN_DRIVER_MAJOR}" -o Dpkg::Options::=--force-overwrite
+        sudo apt autoremove -y --purge
+        echo ""
+        echo "================================================================"
+        echo "  Driver $MIN_DRIVER_MAJOR installed. Please run:"
+        echo ""
+        echo "      sudo reboot"
+        echo ""
+        echo "  Then re-run ./setup.sh to finish the rest of the install."
+        echo "================================================================"
+        exit 0
+    fi
+fi
+
 # ── Install GitHub CLI if not present ────────────────────────────────────────
 if ! command -v gh &>/dev/null; then
     echo "==> Installing gh..."
