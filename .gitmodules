@@ -4,3 +4,6 @@
 [submodule "models/cellflow"]
 	path = models/cellflow
 	url = https://github.com/theislab/cellflow.git
+[submodule "models/scgpt"]
+	path = models/scgpt
+	url = https://github.com/bowang-lab/scGPT.git
