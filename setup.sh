@@ -64,6 +64,13 @@ echo "==> uv $(uv --version)"
 echo "==> Initializing git submodules..."
 git submodule update --init --recursive
 
+# ── Setup the shared tools venv (gears, cell-eval, ...) ──────────────────────
+echo ""
+echo "================================================================"
+echo "  Running: tools/setup.sh"
+echo "================================================================"
+bash tools/setup.sh
+
 # ── Setup each model environment ─────────────────────────────────────────────
 for setup_script in models/setup_*.sh; do
     echo ""
@@ -74,4 +81,6 @@ for setup_script in models/setup_*.sh; do
 done
 
 echo ""
-echo "==> All done. Each model has its own .venv under models/<name>/.venv"
+echo "==> All done."
+echo "    tools venv:  tools/.venv"
+echo "    model venvs: models/<name>/.venv"
