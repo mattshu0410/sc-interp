@@ -49,6 +49,10 @@ from scgpt.model.generation_model import map_raw_id_to_vocab_id
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.utils import compute_perturbation_metrics, set_seed
 
+import _hf  # scripts/_hf.py, on sys.path since this file lives in scripts/
+
+FT_FILES = ["best_model.pt", "training_stats.json"]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CKPT_ROOT = REPO_ROOT / "models" / "scgpt" / "checkpoints"
 DEFAULT_PRETRAINED = CKPT_ROOT / "scGPT_human"
@@ -417,6 +421,10 @@ def maybe_finetune(
     ckpt_path = cache_dir / "best_model.pt"
     stats_path = cache_dir / "training_stats.json"
 
+    # Priority: local cache > HF hub > train
+    if not ckpt_path.exists() and args.hf_repo and not args.force_finetune:
+        _hf.try_download(args.hf_repo, cache_dir, FT_FILES)
+
     if ckpt_path.exists() and not args.force_finetune:
         print(f"==> fine-tuned checkpoint exists at {ckpt_path}, loading")
         load_finetuned_weights(model, ckpt_path, device)
@@ -447,6 +455,10 @@ def maybe_finetune(
     with open(stats_path, "w") as f:
         json.dump(asdict(stats), f, indent=2)
     print(f"==> saved fine-tuned checkpoint to {ckpt_path}")
+
+    if args.hf_repo:
+        _hf.try_upload(args.hf_repo, cache_dir, FT_FILES)
+
     return model, stats
 
 
@@ -582,6 +594,14 @@ def parse_args() -> argparse.Namespace:
         "--force-finetune",
         action="store_true",
         help="ignore cached fine-tuned checkpoint and retrain",
+    )
+    p.add_argument(
+        "--hf-repo",
+        type=str,
+        default=None,
+        help="HuggingFace repo id (e.g. user/scGPT-norman-ft). If set, try "
+        "downloading fine-tuned weights from here when no local cache, "
+        "and upload after training.",
     )
     return p.parse_args()
 
