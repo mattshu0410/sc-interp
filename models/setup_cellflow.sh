@@ -17,7 +17,7 @@ source .venv/bin/activate
 # (embedding/external/pp are needed because cellflow's __init__ imports them eagerly)
 uv pip install -e ".[embedding,external,pp]"
 
-# Replace CPU JAX with CUDA 12 build for GPU support
-uv pip install --upgrade "jax[cuda12]"
+# Replace CPU JAX with CUDA 13 build for GPU support
+uv pip install --upgrade "jax[cuda13]"
 
 echo "==> CellFlow environment ready at $MODEL_DIR/.venv"
