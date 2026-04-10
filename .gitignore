@@ -20,9 +20,11 @@ data/**
 
 # Model artifacts (downloaded via setup scripts)
 _artifacts/
+models/*/checkpoints/
 
-# Inference outputs
+# Inference outputs and cell-eval results
 predictions/
+eval_outputs/
 
 # IDE
 .vscode/
