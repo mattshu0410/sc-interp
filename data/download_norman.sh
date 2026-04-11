@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Download the Norman 2019 Perturb-seq dataset and materialize its canonical
+# Download the Norman 2019 Perturb-seq dataset and materialise its canonical
 # train/val/test split. Runs in the tools venv (gears lives there). GEARS
 # pulls the raw dataset from Harvard Dataverse on first run and caches it
-# under data/norman/; the materializer then computes the simulation split
+# under data/norman/; the materialiser then computes the simulation split
 # and writes it as canonical JSON for runners to consume.
 
 set -euo pipefail

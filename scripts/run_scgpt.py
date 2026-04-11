@@ -300,8 +300,8 @@ def finetune(
     stop_metric (tutorial uses 'pearson'). Early-stop fires after
     early_stop epochs of no improvement on stop_metric.
     """
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+    optimiser = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=1, gamma=0.9)
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
     best_val_score = -float("inf")
@@ -326,16 +326,16 @@ def finetune(
         epoch_loss = 0.0
         epoch_batches = 0
         for batch in inputs.train_loader:
-            optimizer.zero_grad()
+            optimiser.zero_grad()
             output, target, inp = forward_pass(
                 model, batch, gene_ids, include_zero_gene, device, amp, max_seq_len
             )
             mask = torch.ones_like(inp, dtype=torch.bool)
             loss = masked_mse_loss(output, target, mask)
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            scaler.unscale_(optimiser)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
+            scaler.step(optimiser)
             scaler.update()
 
             cells_seen += len(batch.y)

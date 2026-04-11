@@ -3,7 +3,7 @@ Score a prediction h5ad against ground truth using Arc's cell-eval.
 
 Usage:
     source tools/.venv/bin/activate
-    python scripts/analyze/eval_cell_eval.py \\
+    python -m scripts.analyse.eval_cell_eval \\
         --predictions predictions/scgpt_norman_test.h5ad \\
         --profile full
 
@@ -53,7 +53,7 @@ def split_prediction_adata(
     obs = pd.DataFrame({pert_col: adata.obs[pert_col].values})
     obs.index = adata.obs_names.astype(str)
 
-    # cell-eval requires non-negative log-normalized values. Some models
+    # cell-eval requires non-negative log-normalised values. Some models
     # (scGPT) can emit tiny negative predictions from a linear decoder;
     # clip at zero here rather than in the canonical prediction h5ad.
     pred_X = np.clip(_to_dense(adata.X), 0, None)

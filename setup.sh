@@ -61,7 +61,7 @@ fi
 echo "==> uv $(uv --version)"
 
 # ── Init submodules ──────────────────────────────────────────────────────────
-echo "==> Initializing git submodules..."
+echo "==> Initialising git submodules..."
 git submodule update --init --recursive
 
 # ── Setup the shared tools venv (gears, cell-eval, ...) ──────────────────────

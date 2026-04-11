@@ -58,7 +58,7 @@ if [ -d "eval_outputs/scgpt_norman_test" ]; then
 else
     section "step 3: running cell-eval on scGPT predictions"
     source tools/.venv/bin/activate
-    python -m scripts.analyze.eval_cell_eval \
+    python -m scripts.analyse.eval_cell_eval \
         --predictions predictions/scgpt_norman_test.h5ad \
         --profile full
     deactivate
@@ -88,7 +88,7 @@ if [ -d "eval_outputs/cellflow_norman_test" ]; then
 else
     section "step 5: running cell-eval on CellFlow predictions"
     source tools/.venv/bin/activate
-    python -m scripts.analyze.eval_cell_eval \
+    python -m scripts.analyse.eval_cell_eval \
         --predictions predictions/cellflow_norman_test.h5ad \
         --profile full
     deactivate

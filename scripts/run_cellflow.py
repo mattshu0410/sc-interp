@@ -246,7 +246,7 @@ def train_cellflow(
         tau_a=1.0,
         tau_b=1.0,
     )
-    optimizer = optax.MultiSteps(optax.adam(5e-5), 20)
+    optimiser = optax.MultiSteps(optax.adam(5e-5), 20)
     flow = {"constant_noise": 1.0}
 
     cf.prepare_model(
@@ -273,7 +273,7 @@ def train_cellflow(
         cond_output_dropout=0.9,
         time_freqs=1024,
         match_fn=match_fn,
-        optimizer=optimizer,
+        optimizer=optimiser,
         probability_path=flow,
         layer_norm_before_concatenation=False,
         linear_projection_before_concatenation=False,

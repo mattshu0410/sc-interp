@@ -1,10 +1,10 @@
-"""GEARS-sourced dataset materializer.
+"""GEARS-sourced dataset materialiser.
 
 Downloads a GEARS-supported dataset, runs prepare_split to compute the
 train/val/test partition, and writes the partition as a canonical split
 JSON at the path scripts.data.splits expects.
 
-The `gears` import happens inside materialize() so this module is safe
+The `gears` import happens inside materialise() so this module is safe
 to import from venvs that lack gears.
 
 Usage:
@@ -22,7 +22,7 @@ from scripts.data.splits import write_split
 from scripts.manifest import REPO_ROOT, Manifest
 
 
-def materialize(
+def materialise(
     manifest: Manifest,
     split_type: str = "simulation",
     seed: int = 42,
@@ -37,7 +37,7 @@ def materialize(
 
     if manifest.source != "gears":
         raise ValueError(
-            f"gears materializer requires manifest.source == 'gears', "
+            f"gears materialiser requires manifest.source == 'gears', "
             f"got {manifest.source!r}"
         )
 
@@ -45,11 +45,11 @@ def materialize(
     if not gears_name:
         raise ValueError(
             f"manifest for {manifest.name!r} missing raw['gears_name'] "
-            f"required by the gears materializer"
+            f"required by the gears materialiser"
         )
 
     data_dir = REPO_ROOT / "data"
-    print(f"==> materializing gears split for {manifest.name} ({gears_name})")
+    print(f"==> materialising gears split for {manifest.name} ({gears_name})")
     print(f"    split_type={split_type}, seed={seed}, tgss={train_gene_set_size}")
 
     pert_data = PertData(str(data_dir))
@@ -82,7 +82,7 @@ def materialize(
 def main() -> None:
     """CLI entry point for `python -m scripts.data.gears`."""
     p = argparse.ArgumentParser(
-        description="Materialize a gears-sourced dataset split as canonical JSON"
+        description="Materialise a gears-sourced dataset split as canonical JSON"
     )
     p.add_argument("--dataset", required=True, help="dataset name under data/")
     p.add_argument("--split-type", default="simulation")
@@ -91,7 +91,7 @@ def main() -> None:
     args = p.parse_args()
 
     manifest = Manifest.load(args.dataset)
-    materialize(
+    materialise(
         manifest,
         split_type=args.split_type,
         seed=args.seed,

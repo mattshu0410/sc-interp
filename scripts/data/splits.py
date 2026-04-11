@@ -4,7 +4,7 @@ Splits live at data/<name>/splits/<split_type>_<seed>_<tgss>.json and
 carry the perturbation-label sets for each partition. This module is
 source-agnostic: it knows the JSON schema and the path convention, and
 nothing about how the splits were produced. Runners import from here;
-source-specific materializers (scripts.data.gears, future scripts.data.*)
+source-specific materialisers (scripts.data.gears, future scripts.data.*)
 write files in this shape.
 """
 
@@ -50,7 +50,7 @@ def load_split(
     if not path.exists():
         raise FileNotFoundError(
             f"canonical split missing at {path}. "
-            f"materialize it by running:\n"
+            f"materialise it by running:\n"
             f"    source tools/.venv/bin/activate\n"
             f"    python -m scripts.data.{manifest.source} --dataset {manifest.name}"
         )
