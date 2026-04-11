@@ -26,6 +26,9 @@ models/*/checkpoints/
 predictions/
 eval_outputs/
 
+# Papers: keep markdown, ignore the source PDFs (may have copyright)
+docs/papers/*.pdf
+
 # IDE
 .vscode/
 .idea/

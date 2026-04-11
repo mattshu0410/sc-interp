@@ -71,6 +71,13 @@ echo "  Running: tools/setup.sh"
 echo "================================================================"
 bash tools/setup.sh
 
+# ── Setup the docs venv (docling for paper conversion) ───────────────────────
+echo ""
+echo "================================================================"
+echo "  Running: docs/setup.sh"
+echo "================================================================"
+bash docs/setup.sh
+
 # ── Setup each model environment ─────────────────────────────────────────────
 for setup_script in models/setup_*.sh; do
     echo ""
@@ -83,4 +90,5 @@ done
 echo ""
 echo "==> All done."
 echo "    tools venv:  tools/.venv"
+echo "    docs venv:   docs/.venv"
 echo "    model venvs: models/<name>/.venv"

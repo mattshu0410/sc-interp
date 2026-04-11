@@ -20,6 +20,9 @@ uv pip install -e . \
     "cellarium-ml @ git+https://github.com/cellarium-ai/cellarium-ml.git" \
     "scvi-tools>=1.2,<1.3"
 
+# Experiment tracking
+uv pip install wandb
+
 # Download model artifacts from S3
 echo "==> Downloading scLDM artifacts..."
 scldm-download-artifacts --group resubmission

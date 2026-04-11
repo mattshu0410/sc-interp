@@ -41,7 +41,8 @@ uv pip install \
     "umap-learn" \
     "leidenalg" \
     "ipython" \
-    "datasets"
+    "datasets" \
+    "wandb"
 
 # GEARS provides PertData, the Norman/Adamson/Replogle loader used in the tutorial
 # scGPT pins cell-gears<0.0.3, so stick with that. torch-geometric is a gears dep

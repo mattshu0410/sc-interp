@@ -49,7 +49,8 @@ from scgpt.model.generation_model import map_raw_id_to_vocab_id
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.utils import compute_perturbation_metrics, set_seed
 
-import _hf  # scripts/_hf.py, on sys.path since this file lives in scripts/
+import _hf       # scripts/_hf.py, on sys.path since this file lives in scripts/
+import _wandb    # scripts/_wandb.py
 
 FT_FILES = ["best_model.pt", "training_stats.json"]
 
@@ -198,12 +199,15 @@ def load_finetuned_weights(
 
 @dataclass
 class TrainStats:
+    num_epochs_trained: int
     cells_seen: int
     steps: int
     wall_clock_s: float
-    best_val_pearson: float
-    best_val_step: int
-    reason: str                 # "early_stop" | "ceiling" | "skipped_cached"
+    best_val_metrics: dict         # full compute_perturbation_metrics dict at the best epoch
+    best_val_epoch: int
+    stop_metric: str               # which key of best_val_metrics drove selection
+    reason: str                    # "max_epochs" | "early_stop" | "skipped_cached"
+    wandb_run_url: str | None = None
 
 
 def forward_pass(
@@ -304,36 +308,47 @@ def finetune(
     inputs: ScgptInputs,
     gene_ids: np.ndarray,
     device: torch.device,
-    ceiling_cells: int,
-    eval_every_cells: int,
-    patience: int,
+    num_epochs: int,
+    early_stop: int,
+    stop_metric: str,
     lr: float,
     include_zero_gene: str,
     amp: bool,
     max_seq_len: int,
 ) -> tuple[TransformerGenerator, TrainStats]:
+    """Per-epoch fine-tuning loop matching scGPT Tutorial_Perturbation.ipynb.
+
+    One epoch = one pass over train_loader, followed by eval_perturb +
+    compute_perturbation_metrics on val_loader. Best model selected by
+    stop_metric (tutorial uses 'pearson'). Early-stop fires after
+    early_stop epochs of no improvement on stop_metric.
+    """
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
 
+    best_val_score = -float("inf")
+    best_state: dict | None = None
+    best_epoch = 0
+    best_metrics: dict = {}
+    patience = 0
     cells_seen = 0
     steps = 0
-    cells_at_last_eval = 0
-    best_val = -float("inf")
-    best_state: dict | None = None
-    best_step = 0
-    patience_left = patience
+    epochs_trained = 0
     t0 = time.time()
-    reason = "ceiling"
+    reason = "max_epochs"
 
     print(
-        f"==> fine-tuning: ceiling={ceiling_cells:,} cells, "
-        f"eval_every={eval_every_cells:,}, patience={patience}"
+        f"==> fine-tuning up to {num_epochs} epochs, "
+        f"early_stop={early_stop}, stop_metric={stop_metric!r}"
     )
 
-    while cells_seen < ceiling_cells:
+    for epoch in range(1, num_epochs + 1):
+        epoch_start = time.time()
+        model.train()
+        epoch_loss = 0.0
+        epoch_batches = 0
         for batch in inputs.train_loader:
-            model.train()
             optimizer.zero_grad()
             output, target, inp = forward_pass(
                 model, batch, gene_ids, include_zero_gene, device, amp, max_seq_len
@@ -348,59 +363,70 @@ def finetune(
 
             cells_seen += len(batch.y)
             steps += 1
+            epoch_loss += float(loss.item())
+            epoch_batches += 1
 
-            if cells_seen - cells_at_last_eval >= eval_every_cells:
-                cells_at_last_eval = cells_seen
-                metrics = evaluate_val(
-                    model,
-                    inputs.val_loader,
-                    inputs.pert_data,
-                    gene_ids,
-                    include_zero_gene,
-                    device,
-                )
-                val_pearson = float(metrics.get("pearson", float("nan")))
-                elapsed = time.time() - t0
-                print(
-                    f"    [step {steps:5d} | cells {cells_seen:>10,} "
-                    f"| loss {loss.item():.4f} "
-                    f"| val_pearson {val_pearson:.4f} "
-                    f"| {elapsed/60:.1f} min]"
-                )
-                if val_pearson > best_val:
-                    best_val = val_pearson
-                    best_state = copy.deepcopy(model.state_dict())
-                    best_step = steps
-                    patience_left = patience
-                else:
-                    patience_left -= 1
-                    if patience_left <= 0:
-                        reason = "early_stop"
-                        break
+        metrics = evaluate_val(
+            model,
+            inputs.val_loader,
+            inputs.pert_data,
+            gene_ids,
+            include_zero_gene,
+            device,
+        )
+        epochs_trained = epoch
+        avg_loss = epoch_loss / max(epoch_batches, 1)
+        elapsed = time.time() - epoch_start
+        print(
+            f"    [epoch {epoch:2d}/{num_epochs} | loss {avg_loss:.4f} | "
+            f"pearson {metrics.get('pearson', float('nan')):.4f} | "
+            f"pearson_delta {metrics.get('pearson_delta', float('nan')):.4f} | "
+            f"{elapsed:.1f}s]"
+        )
+        _wandb.log(
+            {
+                "train/loss": avg_loss,
+                "train/cells_seen": cells_seen,
+                "train/epoch": epoch,
+                **{f"val/{k}": float(v) for k, v in metrics.items()},
+            },
+            step=epoch,
+        )
 
-            if cells_seen >= ceiling_cells:
-                break
+        val_score = float(metrics.get(stop_metric, float("nan")))
+        if val_score > best_val_score:
+            best_val_score = val_score
+            best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
+            best_metrics = {k: float(v) for k, v in metrics.items()}
+            patience = 0
         else:
-            scheduler.step()
-            continue
-        break
+            patience += 1
+            if patience >= early_stop:
+                reason = "early_stop"
+                print(f"==> early stop at epoch {epoch}")
+                break
+
+        scheduler.step()
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     stats = TrainStats(
+        num_epochs_trained=epochs_trained,
         cells_seen=cells_seen,
         steps=steps,
         wall_clock_s=time.time() - t0,
-        best_val_pearson=best_val,
-        best_val_step=best_step,
+        best_val_metrics=best_metrics,
+        best_val_epoch=best_epoch,
+        stop_metric=stop_metric,
         reason=reason,
+        wandb_run_url=_wandb.url(),
     )
     print(
-        f"==> fine-tune done: reason={stats.reason}, "
-        f"best_val_pearson={stats.best_val_pearson:.4f} at step {stats.best_val_step}, "
-        f"cells_seen={stats.cells_seen:,}, steps={stats.steps}, "
-        f"wall={stats.wall_clock_s/60:.1f}min"
+        f"==> fine-tune done: reason={reason}, "
+        f"best {stop_metric}={best_val_score:.4f} at epoch {best_epoch}, "
+        f"cells_seen={cells_seen:,}, wall={stats.wall_clock_s/60:.1f}min"
     )
     return model, stats
 
@@ -430,10 +456,18 @@ def maybe_finetune(
         load_finetuned_weights(model, ckpt_path, device)
         if stats_path.exists():
             with open(stats_path) as f:
-                data = json.load(f)
-            stats = TrainStats(**data)
+                stats = TrainStats(**json.load(f))
         else:
-            stats = TrainStats(0, 0, 0.0, float("nan"), 0, "skipped_cached")
+            stats = TrainStats(
+                num_epochs_trained=0,
+                cells_seen=0,
+                steps=0,
+                wall_clock_s=0.0,
+                best_val_metrics={},
+                best_val_epoch=0,
+                stop_metric=args.stop_metric,
+                reason="skipped_cached",
+            )
         return model, stats
 
     model, stats = finetune(
@@ -441,9 +475,9 @@ def maybe_finetune(
         inputs=inputs,
         gene_ids=gene_ids,
         device=device,
-        ceiling_cells=args.ceiling_cells,
-        eval_every_cells=args.eval_every_cells,
-        patience=args.patience,
+        num_epochs=args.num_epochs,
+        early_stop=args.early_stop,
+        stop_metric=args.stop_metric,
         lr=args.lr,
         include_zero_gene=args.include_zero_gene,
         amp=args.amp,
@@ -566,21 +600,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split-type", default="simulation")
     p.add_argument("--seed", type=int, default=42)
 
-    # Fine-tuning knobs
+    # Fine-tuning knobs (defaults match scGPT Tutorial_Perturbation.ipynb)
     p.add_argument(
-        "--ceiling-cells",
+        "--num-epochs",
         type=int,
-        default=30_000_000,
-        help="upper bound on total training cells seen, default 30M",
+        default=15,
+        help="max training epochs, default 15 (tutorial)",
     )
     p.add_argument(
-        "--eval-every-cells",
+        "--early-stop",
         type=int,
-        default=100_000,
-        help="run val evaluation every N cells seen, default 100k (~1 epoch on Norman)",
+        default=10,
+        help="stop after N epochs of no val improvement, default 10 (tutorial)",
     )
     p.add_argument(
-        "--patience", type=int, default=5, help="early stop after N evals without improvement"
+        "--stop-metric",
+        default="pearson",
+        choices=["pearson", "pearson_delta", "pearson_de", "pearson_de_delta"],
+        help="which compute_perturbation_metrics key drives best-checkpoint selection",
     )
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--amp", action="store_true", default=True)
@@ -603,6 +640,7 @@ def parse_args() -> argparse.Namespace:
         "downloading fine-tuned weights from here when no local cache, "
         "and upload after training.",
     )
+    _wandb.add_args(p)
     return p.parse_args()
 
 
@@ -614,6 +652,8 @@ def main() -> None:
 
     manifest = load_manifest(args.dataset)
     print(f"==> dataset: {manifest['name']}")
+
+    _wandb.init("scgpt", args.dataset, args)
 
     inputs = load_dataset(manifest, args)
 
@@ -658,6 +698,8 @@ def main() -> None:
         pert_col,
         control_label,
     )
+
+    _wandb.finish()
 
 
 if __name__ == "__main__":
