@@ -1,10 +1,4 @@
-"""
-HuggingFace Hub upload/download helpers shared by model runners.
-
-Imported by scripts/run_*.py via plain `import _hf` (the runner's dir is
-on sys.path automatically when you launch it). Keeps the HF logic out
-of each runner's main file without introducing a packaged dependency.
-"""
+"""HuggingFace Hub upload/download and model-card helpers for runners."""
 
 from pathlib import Path
 from typing import Any

@@ -3,12 +3,10 @@ Train CellFlow on a perturbation dataset and write predictions.
 
 Usage:
     source models/cellflow/.venv/bin/activate
-    python scripts/run_cellflow.py \\
-        --dataset norman \\
-        --split test
+    python -m scripts.run cellflow --dataset norman --split test
 
 If a cached trained model exists at models/cellflow/checkpoints/<dataset>/,
-training is skipped. --force-train to retrain.
+training is skipped. --force to retrain.
 
 CellFlow consumes AnnData with gene perturbations encoded as two obs
 columns (gene1, gene2) plus an ESM2 embedding dict in adata.uns. We
@@ -17,21 +15,15 @@ GEARS's simulation split so the eval set matches the scGPT runner.
 """
 
 import argparse
-import json
-import sys
+import functools
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-
-import pickle
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-import yaml
-
-import functools
 
 import cellflow
 import cellflow.preprocessing as cfpp
@@ -41,13 +33,16 @@ from cellflow.model import CellFlow
 from cellflow.preprocessing import get_esm_embedding
 from ott.solvers import utils as solver_utils
 
-sys.path.insert(0, str(Path(__file__).parent))
-import _hf
-import _wandb
+from scripts import wb
+from scripts.cache import TrainStats, cache_or_train
+from scripts.data.genes import build_symbol_to_id
+from scripts.data.splits import load_split
+from scripts.manifest import Manifest
+from scripts.runner import RunnerSpec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CKPT_ROOT = REPO_ROOT / "models" / "cellflow" / "checkpoints"
-CF_FILES = ["CellFlow.pkl", "training_stats.json"]
+CF_FILES = ["CellFlow.pkl"]
 
 # Control label used on CellFlow's side. The condition parser translates
 # GEARS's "ctrl" labels into this value on both gene slots.
@@ -96,41 +91,33 @@ def _parse_condition(
     return _map(a), _map(b)
 
 
-def _load_gears(manifest: dict, args: argparse.Namespace) -> CellFlowInputs:
-    """Load a GEARS-processed dataset directly from disk.
+def _load_gears(manifest: Manifest, args: argparse.Namespace) -> CellFlowInputs:
+    """Load a GEARS-processed AnnData and read the canonical split JSON.
 
-    Reads the processed h5ad and the split pickle that were produced by
-    the tools venv running gears.PertData. Avoids importing gears here
-    so the cellflow venv doesn't need it as a dep.
+    Does not import gears. The processed h5ad and the canonical split JSON
+    are produced by scripts.data.gears running in the tools venv.
     """
-    split_cfg = manifest.get("split", {})
+    split_cfg = manifest.raw.get("split", {}) or {}
     split_type = split_cfg.get("split_type", args.split_type)
     seed = split_cfg.get("seed", args.seed)
     train_gene_set_size = split_cfg.get("train_gene_set_size", 0.75)
 
-    dataset_dir = REPO_ROOT / "data" / manifest["gears_name"]
+    gears_name = manifest.raw["gears_name"]
+    dataset_dir = REPO_ROOT / "data" / gears_name
     adata = ad.read_h5ad(dataset_dir / "perturb_processed.h5ad")
 
-    split_pkl = (
-        dataset_dir
-        / "splits"
-        / f"{manifest['gears_name']}_{split_type}_{seed}_{train_gene_set_size}.pkl"
-    )
-    if not split_pkl.exists():
-        raise FileNotFoundError(
-            f"split pickle missing at {split_pkl}. Run the scgpt runner once "
-            "to materialise it via gears.PertData.prepare_split, or call "
-            "gears from the tools venv."
+    split = load_split(manifest, split_type, seed, train_gene_set_size)
+
+    pert_col = manifest.obs.pert_col
+    ctrl_label = manifest.obs.control_label
+
+    if manifest.var is None or manifest.var.gene_id_type != "ensembl":
+        raise ValueError(
+            f"cellflow gears loader requires manifest.var with "
+            f"gene_id_type=ensembl for ESM lookup, got "
+            f"{manifest.var.gene_id_type if manifest.var else None!r}"
         )
-    with open(split_pkl, "rb") as f:
-        set2conditions = pickle.load(f)
-
-    pert_col = manifest["obs"]["pert_col"]
-    ctrl_label = manifest["obs"]["control_label"]
-
-    # Build gene symbol -> Ensembl ID lookup from var. In Norman, var_names
-    # are Ensembl IDs and the gene_name column has symbols.
-    symbol_to_id = dict(zip(adata.var["gene_name"].astype(str), adata.var_names.astype(str)))
+    symbol_to_id = build_symbol_to_id(adata, manifest.var)
 
     # Column names match the CellFlow reproducibility repo's Norman config
     # (gene_1/gene_2, control, esm2) so this adata is a drop-in fit for
@@ -168,9 +155,9 @@ def _load_gears(manifest: dict, args: argparse.Namespace) -> CellFlowInputs:
     # Three-way split from GEARS simulation. Controls are a shared baseline
     # and get included in all three AnnDatas so CellFlow can do
     # control->pert transport during both training and evaluation.
-    train_perts = set(set2conditions["train"])
-    val_perts = set(set2conditions["val"])
-    test_perts = set(set2conditions["test"])
+    train_perts = set(split["train"])
+    val_perts = set(split["val"])
+    test_perts = set(split["test"])
     is_ctrl = adata.obs["control"].values
 
     adata_train = adata[adata.obs[pert_col].isin(train_perts).values | is_ctrl].copy()
@@ -204,35 +191,22 @@ def _load_gears(manifest: dict, args: argparse.Namespace) -> CellFlowInputs:
     )
 
 
-LOADERS: dict[str, Callable[[dict, argparse.Namespace], CellFlowInputs]] = {
+LOADERS: dict[str, Callable[[Manifest, argparse.Namespace], CellFlowInputs]] = {
     "gears": _load_gears,
 }
 
 
-def load_dataset(manifest: dict, args: argparse.Namespace) -> CellFlowInputs:
-    source = manifest["source"]
-    if source not in LOADERS:
+def load_dataset(manifest: Manifest, args: argparse.Namespace) -> CellFlowInputs:
+    """Dispatch to the LOADERS handler for manifest.source."""
+    if manifest.source not in LOADERS:
         raise NotImplementedError(
-            f"manifest source {source!r} not supported by run_cellflow. "
+            f"manifest source {manifest.source!r} not supported by run_cellflow. "
             f"registered: {sorted(LOADERS)}"
         )
-    return LOADERS[source](manifest, args)
-
-
-def load_manifest(dataset: str) -> dict:
-    manifest_path = REPO_ROOT / "data" / dataset / "manifest.yaml"
-    with open(manifest_path) as f:
-        return yaml.safe_load(f)
+    return LOADERS[manifest.source](manifest, args)
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class TrainStats:
-    iterations: int
-    wall_clock_s: float
-    wandb_run_url: str | None = None
 
 
 def train_cellflow(
@@ -340,9 +314,13 @@ def train_cellflow(
         run_url = None
 
     stats = TrainStats(
-        iterations=args.num_iterations,
         wall_clock_s=wall,
         wandb_run_url=run_url,
+        details={
+            "iterations": args.num_iterations,
+            "batch_size": args.batch_size,
+            "valid_freq": args.valid_freq,
+        },
     )
     print(f"==> training done in {wall/60:.1f} min")
     return cf, stats
@@ -351,23 +329,8 @@ def train_cellflow(
 def maybe_train(
     inputs: CellFlowInputs, dataset: str, args: argparse.Namespace
 ) -> tuple[CellFlow, TrainStats]:
+    """Resolve trained CellFlow weights via cache_or_train."""
     cache_dir = CKPT_ROOT / dataset
-    ckpt_path = cache_dir / "CellFlow.pkl"
-    stats_path = cache_dir / "training_stats.json"
-
-    if not ckpt_path.exists() and args.hf_repo and not args.force_train:
-        _hf.try_download(args.hf_repo, cache_dir, CF_FILES)
-
-    if ckpt_path.exists() and not args.force_train:
-        print(f"==> cached CellFlow found at {ckpt_path}, loading")
-        cf = CellFlow.load(str(ckpt_path))
-        if stats_path.exists():
-            with open(stats_path) as f:
-                stats = TrainStats(**json.load(f))
-        else:
-            stats = TrainStats(iterations=0, wall_clock_s=0.0)
-        return cf, stats
-
     wandb_config = {
         "model": "cellflow",
         "dataset": dataset,
@@ -381,17 +344,25 @@ def maybe_train(
         "split_type": "gears_simulation",
         "seed": args.seed,
     }
-    cf, stats = train_cellflow(inputs, args, wandb_config)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cf.save(str(cache_dir), overwrite=True)
-    with open(stats_path, "w") as f:
-        json.dump(asdict(stats), f, indent=2)
-    print(f"==> saved CellFlow to {ckpt_path}")
 
-    if args.hf_repo:
-        _hf.try_upload(args.hf_repo, cache_dir, CF_FILES)
+    def _load(cache: Path) -> CellFlow:
+        return CellFlow.load(str(cache / "CellFlow.pkl"))
 
-    return cf, stats
+    def _train() -> tuple[CellFlow, TrainStats]:
+        return train_cellflow(inputs, args, wandb_config)
+
+    def _save(cf: CellFlow, cache: Path) -> None:
+        cf.save(str(cache), overwrite=True)
+
+    return cache_or_train(
+        cache_dir=cache_dir,
+        files=CF_FILES,
+        hf_repo=args.hf_repo,
+        force=args.force,
+        load_cached=_load,
+        train=_train,
+        save_trained=_save,
+    )
 
 
 # ── Inference and saving ─────────────────────────────────────────────────────
@@ -501,58 +472,72 @@ def save_predictions(
     adata_out.uns["split"] = split
     adata_out.uns["pert_col"] = pert_col
     adata_out.uns["control_label"] = control_label
-    adata_out.uns["train_stats"] = asdict(train_stats)
+    adata_out.uns["train_stats"] = train_stats.__dict__
     adata_out.write_h5ad(output)
     print(f"==> wrote {adata_out.shape} to {output}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Runner spec ───────────────────────────────────────────────────────────────
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--dataset", required=True)
-    p.add_argument("--split", default="test", choices=["train", "val", "test"])
-    p.add_argument("--output", type=Path)
+def _add_args(p: argparse.ArgumentParser) -> None:
+    """Add cellflow-specific flags on top of the common ones."""
     p.add_argument("--split-type", default="simulation")
-    p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--esm-model",
         default="esm2_t6_8M_UR50D",
-        help="ESM2 model for gene embeddings, default the 8M param version",
+        help="ESM2 model for gene embeddings",
     )
-
-    # Training knobs (defaults match the CellFlow reproducibility repo's
-    # conf/training/norman.yaml: fixed budget, no mid-training val eval)
     p.add_argument("--num-iterations", type=int, default=200_000)
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--valid-freq", type=int, default=400_000)
 
-    p.add_argument("--force-train", action="store_true")
-    p.add_argument("--hf-repo", default=None)
-    _wandb.add_args(p)
-    return p.parse_args()
+
+def _train_or_load(
+    inputs: CellFlowInputs, dataset: str, args: argparse.Namespace
+) -> tuple[CellFlow, TrainStats]:
+    """Resolve the trained CellFlow via maybe_train."""
+    return maybe_train(inputs, dataset, args)
 
 
-def main() -> None:
-    args = parse_args()
-    manifest = load_manifest(args.dataset)
-    print(f"==> dataset: {manifest['name']}")
+def _predict(
+    cf: CellFlow, inputs: CellFlowInputs, args: argparse.Namespace
+) -> dict:
+    """Run cf.predict on held-out test perturbations."""
+    return predict(cf, inputs)
 
-    inputs = load_dataset(manifest, args)
-    cf, train_stats = maybe_train(inputs, args.dataset, args)
 
-    pert_col = manifest["obs"]["pert_col"]
-    control_label = manifest["obs"]["control_label"]
-    preds = predict(cf, inputs)
-
-    output = args.output or (
-        REPO_ROOT / "predictions" / f"cellflow_{args.dataset}_{args.split}.h5ad"
-    )
+def _save_predictions(
+    preds: dict,
+    inputs: CellFlowInputs,
+    manifest: Manifest,
+    args: argparse.Namespace,
+    stats: TrainStats,
+    output: Path,
+) -> None:
+    """Invoke the module-level save_predictions with resolved manifest fields."""
     save_predictions(
-        preds, inputs, output, args.dataset, args.split, train_stats, pert_col, control_label
+        preds,
+        inputs,
+        output,
+        args.dataset,
+        args.split,
+        stats,
+        manifest.obs.pert_col,
+        manifest.obs.control_label,
     )
+
+
+SPEC = RunnerSpec(
+    name="cellflow",
+    add_args=_add_args,
+    load_inputs=load_dataset,
+    train_or_load=_train_or_load,
+    predict=_predict,
+    save_predictions=_save_predictions,
+)
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.runner import run
+    run(SPEC)

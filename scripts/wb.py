@@ -1,12 +1,7 @@
-"""
-Shared WandB helpers for sc-interp model runners.
+"""WandB wrapper for model runners.
 
-Same pattern as _hf.py: imported by scripts/run_*.py via plain
-`import _wandb` and offers a uniform init/log/finish interface so the
-runners don't need to know about wandb internals.
-
-Disabled gracefully if wandb is not installed or --wandb-mode=disabled,
-so runners can always call these without guarding.
+Exposes add_args/init/log/finish/url. No-ops silently when wandb is not
+installed or --wandb-mode=disabled.
 """
 
 import argparse

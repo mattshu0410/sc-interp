@@ -3,13 +3,11 @@ Fine-tune and run scGPT perturbation prediction on a dataset from data/.
 
 Usage:
     source models/scgpt/.venv/bin/activate
-    python scripts/run_scgpt.py \\
-        --dataset norman \\
-        --split test
+    python -m scripts.run scgpt --dataset norman --split test
 
 If a fine-tuned checkpoint for the dataset already exists at
 models/scgpt/checkpoints/<dataset>_ft/, training is skipped. Use
---force-finetune to retrain from scratch.
+--force to retrain from scratch.
 
 The pretrained whole-human checkpoint comes from the setup script
 (models/setup_scgpt.sh). Our fine-tuning starts from those weights and
@@ -27,7 +25,7 @@ import copy
 import json
 import time
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -40,7 +38,6 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
-import yaml
 from gears import PertData
 
 from scgpt.loss import masked_mse_loss
@@ -49,10 +46,12 @@ from scgpt.model.generation_model import map_raw_id_to_vocab_id
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.utils import compute_perturbation_metrics, set_seed
 
-import _hf       # scripts/_hf.py, on sys.path since this file lives in scripts/
-import _wandb    # scripts/_wandb.py
+from scripts import wb
+from scripts.cache import TrainStats, cache_or_train
+from scripts.manifest import Manifest
+from scripts.runner import RunnerSpec
 
-FT_FILES = ["best_model.pt", "training_stats.json"]
+FT_FILES = ["best_model.pt"]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CKPT_ROOT = REPO_ROOT / "models" / "scgpt" / "checkpoints"
@@ -60,28 +59,28 @@ DEFAULT_PRETRAINED = CKPT_ROOT / "scGPT_human"
 
 
 # ── Dataset dispatch ──────────────────────────────────────────────────────────
-# Registry of manifest-source handlers. To add a new source:
-#   1. Write a function (manifest, args) -> ScgptInputs
-#   2. Register it in LOADERS below.
-#
-# scGPT consumes GEARS-style batches (torch_geometric Data with .pert, .x, .y,
-# .de_idx), so new sources must produce those, not raw AnnData.
+# Registry of manifest-source handlers. Add a new source by writing a
+# (manifest, args) -> ScgptInputs function and registering it in LOADERS.
+# scGPT consumes GEARS-style torch_geometric batches (.pert, .x, .y, .de_idx)
+# so every handler must produce those.
 
 
 @dataclass
 class ScgptInputs:
-    pert_data: PertData               # needed later for ctrl adata in metrics
+    """Everything finetune/predict need from the dataset loader."""
+    pert_data: PertData
     train_loader: Iterable
     val_loader: Iterable
     test_loader: Iterable
     var: pd.DataFrame
 
 
-def _load_gears(manifest: dict, args: argparse.Namespace) -> ScgptInputs:
+def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
+    """Build GEARS dataloaders for a manifest whose source is 'gears'."""
     pert_data = PertData(str(REPO_ROOT / "data"))
-    pert_data.load(data_name=manifest["gears_name"])
+    pert_data.load(data_name=manifest.raw["gears_name"])
     pert_data.prepare_split(
-        split=manifest.get("split", {}).get("default", args.split_type),
+        split=manifest.raw.get("split", {}).get("default", args.split_type),
         seed=args.seed,
     )
     pert_data.get_dataloader(
@@ -96,28 +95,19 @@ def _load_gears(manifest: dict, args: argparse.Namespace) -> ScgptInputs:
     )
 
 
-LOADERS: dict[str, Callable[[dict, argparse.Namespace], ScgptInputs]] = {
+LOADERS: dict[str, Callable[[Manifest, argparse.Namespace], ScgptInputs]] = {
     "gears": _load_gears,
 }
 
 
-def load_dataset(manifest: dict, args: argparse.Namespace) -> ScgptInputs:
-    source = manifest["source"]
-    if source not in LOADERS:
+def load_dataset(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
+    """Dispatch to the LOADERS handler for manifest.source."""
+    if manifest.source not in LOADERS:
         raise NotImplementedError(
-            f"manifest source {source!r} not supported by run_scgpt. "
-            f"registered: {sorted(LOADERS)}. "
-            f"see LOADERS comment in this file to add a new one."
+            f"manifest source {manifest.source!r} not supported by run_scgpt. "
+            f"registered: {sorted(LOADERS)}"
         )
-    return LOADERS[source](manifest, args)
-
-
-def load_manifest(dataset: str) -> dict:
-    manifest_path = REPO_ROOT / "data" / dataset / "manifest.yaml"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"no manifest at {manifest_path}")
-    with open(manifest_path) as f:
-        return yaml.safe_load(f)
+    return LOADERS[manifest.source](manifest, args)
 
 
 # ── Model construction and checkpoint loading ────────────────────────────────
@@ -195,19 +185,6 @@ def load_finetuned_weights(
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class TrainStats:
-    num_epochs_trained: int
-    cells_seen: int
-    steps: int
-    wall_clock_s: float
-    best_val_metrics: dict         # full compute_perturbation_metrics dict at the best epoch
-    best_val_epoch: int
-    stop_metric: str               # which key of best_val_metrics drove selection
-    reason: str                    # "max_epochs" | "early_stop" | "skipped_cached"
-    wandb_run_url: str | None = None
 
 
 def forward_pass(
@@ -383,7 +360,7 @@ def finetune(
             f"pearson_delta {metrics.get('pearson_delta', float('nan')):.4f} | "
             f"{elapsed:.1f}s]"
         )
-        _wandb.log(
+        wb.log(
             {
                 "train/loss": avg_loss,
                 "train/cells_seen": cells_seen,
@@ -413,15 +390,17 @@ def finetune(
         model.load_state_dict(best_state)
 
     stats = TrainStats(
-        num_epochs_trained=epochs_trained,
-        cells_seen=cells_seen,
-        steps=steps,
         wall_clock_s=time.time() - t0,
-        best_val_metrics=best_metrics,
-        best_val_epoch=best_epoch,
-        stop_metric=stop_metric,
+        wandb_run_url=wb.url(),
         reason=reason,
-        wandb_run_url=_wandb.url(),
+        details={
+            "num_epochs_trained": epochs_trained,
+            "cells_seen": cells_seen,
+            "steps": steps,
+            "best_val_metrics": best_metrics,
+            "best_val_epoch": best_epoch,
+            "stop_metric": stop_metric,
+        },
     )
     print(
         f"==> fine-tune done: reason={reason}, "
@@ -432,6 +411,7 @@ def finetune(
 
 
 def finetune_cache_dir(dataset: str) -> Path:
+    """Per-dataset cache directory under models/scgpt/checkpoints/."""
     return CKPT_ROOT / f"{dataset}_ft"
 
 
@@ -443,57 +423,40 @@ def maybe_finetune(
     device: torch.device,
     args: argparse.Namespace,
 ) -> tuple[TransformerGenerator, TrainStats]:
+    """Resolve the fine-tuned weights via cache_or_train, mutating model in place."""
     cache_dir = finetune_cache_dir(dataset)
-    ckpt_path = cache_dir / "best_model.pt"
-    stats_path = cache_dir / "training_stats.json"
 
-    # Priority: local cache > HF hub > train
-    if not ckpt_path.exists() and args.hf_repo and not args.force_finetune:
-        _hf.try_download(args.hf_repo, cache_dir, FT_FILES)
+    def _load(cache: Path) -> TransformerGenerator:
+        load_finetuned_weights(model, cache / "best_model.pt", device)
+        return model
 
-    if ckpt_path.exists() and not args.force_finetune:
-        print(f"==> fine-tuned checkpoint exists at {ckpt_path}, loading")
-        load_finetuned_weights(model, ckpt_path, device)
-        if stats_path.exists():
-            with open(stats_path) as f:
-                stats = TrainStats(**json.load(f))
-        else:
-            stats = TrainStats(
-                num_epochs_trained=0,
-                cells_seen=0,
-                steps=0,
-                wall_clock_s=0.0,
-                best_val_metrics={},
-                best_val_epoch=0,
-                stop_metric=args.stop_metric,
-                reason="skipped_cached",
-            )
-        return model, stats
+    def _train() -> tuple[TransformerGenerator, TrainStats]:
+        return finetune(
+            model=model,
+            inputs=inputs,
+            gene_ids=gene_ids,
+            device=device,
+            num_epochs=args.num_epochs,
+            early_stop=args.early_stop,
+            stop_metric=args.stop_metric,
+            lr=args.lr,
+            include_zero_gene=args.include_zero_gene,
+            amp=args.amp,
+            max_seq_len=args.max_seq_len,
+        )
 
-    model, stats = finetune(
-        model=model,
-        inputs=inputs,
-        gene_ids=gene_ids,
-        device=device,
-        num_epochs=args.num_epochs,
-        early_stop=args.early_stop,
-        stop_metric=args.stop_metric,
-        lr=args.lr,
-        include_zero_gene=args.include_zero_gene,
-        amp=args.amp,
-        max_seq_len=args.max_seq_len,
+    def _save(m: TransformerGenerator, cache: Path) -> None:
+        torch.save(m.state_dict(), cache / "best_model.pt")
+
+    return cache_or_train(
+        cache_dir=cache_dir,
+        files=FT_FILES,
+        hf_repo=args.hf_repo,
+        force=args.force,
+        load_cached=_load,
+        train=_train,
+        save_trained=_save,
     )
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), ckpt_path)
-    with open(stats_path, "w") as f:
-        json.dump(asdict(stats), f, indent=2)
-    print(f"==> saved fine-tuned checkpoint to {ckpt_path}")
-
-    if args.hf_repo:
-        _hf.try_upload(args.hf_repo, cache_dir, FT_FILES)
-
-    return model, stats
 
 
 # ── Inference and saving ─────────────────────────────────────────────────────
@@ -569,28 +532,29 @@ def save_predictions(
     adata.uns["split"] = split
     adata.uns["pert_col"] = pert_col
     adata.uns["control_label"] = control_label
-    adata.uns["train_stats"] = asdict(train_stats)
+    adata.uns["train_stats"] = train_stats.__dict__
     adata.write_h5ad(output)
     print(f"==> wrote {adata.shape} to {output} ({ctrl_adata.n_obs} control cells included)")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Runner spec ───────────────────────────────────────────────────────────────
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--dataset", required=True, help="dataset name under data/")
+@dataclass
+class ScgptTrained:
+    """State produced by train_or_load and consumed by predict."""
+    model: TransformerGenerator
+    gene_ids: np.ndarray
+    device: torch.device
+
+
+def _add_args(p: argparse.ArgumentParser) -> None:
+    """Add scgpt-specific flags on top of the common ones."""
     p.add_argument(
         "--pretrained-dir",
         type=Path,
         default=DEFAULT_PRETRAINED,
         help="scGPT foundation checkpoint folder",
-    )
-    p.add_argument("--split", default="test", choices=["train", "val", "test"])
-    p.add_argument(
-        "--output",
-        type=Path,
-        help="output h5ad path, default predictions/scgpt_<dataset>_<split>.h5ad",
     )
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--eval-batch-size", type=int, default=64)
@@ -598,66 +562,26 @@ def parse_args() -> argparse.Namespace:
         "--include-zero-gene", default="all", choices=["all", "batch-wise"]
     )
     p.add_argument("--split-type", default="simulation")
-    p.add_argument("--seed", type=int, default=42)
-
-    # Fine-tuning knobs (defaults match scGPT Tutorial_Perturbation.ipynb)
-    p.add_argument(
-        "--num-epochs",
-        type=int,
-        default=15,
-        help="max training epochs, default 15 (tutorial)",
-    )
-    p.add_argument(
-        "--early-stop",
-        type=int,
-        default=10,
-        help="stop after N epochs of no val improvement, default 10 (tutorial)",
-    )
+    p.add_argument("--num-epochs", type=int, default=15)
+    p.add_argument("--early-stop", type=int, default=10)
     p.add_argument(
         "--stop-metric",
         default="pearson",
         choices=["pearson", "pearson_delta", "pearson_de", "pearson_de_delta"],
-        help="which compute_perturbation_metrics key drives best-checkpoint selection",
     )
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--amp", action="store_true", default=True)
-    p.add_argument(
-        "--max-seq-len",
-        type=int,
-        default=1536,
-        help="sequence length cap when include_zero_gene=all",
-    )
-    p.add_argument(
-        "--force-finetune",
-        action="store_true",
-        help="ignore cached fine-tuned checkpoint and retrain",
-    )
-    p.add_argument(
-        "--hf-repo",
-        type=str,
-        default=None,
-        help="HuggingFace repo id (e.g. user/scGPT-norman-ft). If set, try "
-        "downloading fine-tuned weights from here when no local cache, "
-        "and upload after training.",
-    )
-    _wandb.add_args(p)
-    return p.parse_args()
+    p.add_argument("--max-seq-len", type=int, default=1536)
 
 
-def main() -> None:
-    args = parse_args()
+def _train_or_load(
+    inputs: ScgptInputs, dataset: str, args: argparse.Namespace
+) -> tuple[ScgptTrained, TrainStats]:
+    """Build the transformer from pretrained weights, then finetune or load cache."""
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"==> device: {device}")
 
-    manifest = load_manifest(args.dataset)
-    print(f"==> dataset: {manifest['name']}")
-
-    _wandb.init("scgpt", args.dataset, args)
-
-    inputs = load_dataset(manifest, args)
-
-    # Build model from foundation architecture
     vocab = build_vocab(args.pretrained_dir / "vocab.json")
     with open(args.pretrained_dir / "args.json") as f:
         margs = json.load(f)
@@ -665,25 +589,36 @@ def main() -> None:
     model = build_model(margs, vocab).to(device)
     load_pretrained_weights(model, args.pretrained_dir / "best_model.pt", device)
 
-    # Fine-tune (or load cached fine-tuned weights)
-    model, train_stats = maybe_finetune(
-        model, inputs, gene_ids, args.dataset, device, args
-    )
+    model, stats = maybe_finetune(model, inputs, gene_ids, dataset, device, args)
+    return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
 
-    # Inference on requested split
+
+def _predict(
+    trained: ScgptTrained, inputs: ScgptInputs, args: argparse.Namespace
+) -> dict:
+    """Run pred_perturb over the requested split and return the results dict."""
     loader = {
         "train": inputs.train_loader,
         "val": inputs.val_loader,
         "test": inputs.test_loader,
     }[args.split]
     print(f"==> running inference on {args.split} split")
-    results = predict(model, loader, gene_ids, args.include_zero_gene, device)
-
-    output = args.output or (
-        REPO_ROOT / "predictions" / f"scgpt_{args.dataset}_{args.split}.h5ad"
+    return predict(
+        trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
     )
-    pert_col = manifest["obs"]["pert_col"]
-    control_label = manifest["obs"]["control_label"]
+
+
+def _save_predictions(
+    results: dict,
+    inputs: ScgptInputs,
+    manifest: Manifest,
+    args: argparse.Namespace,
+    stats: TrainStats,
+    output: Path,
+) -> None:
+    """Invoke the module-level save_predictions with resolved manifest fields."""
+    pert_col = manifest.obs.pert_col
+    control_label = manifest.obs.control_label
     ctrl_adata = inputs.pert_data.adata[
         inputs.pert_data.adata.obs[pert_col] == control_label
     ]
@@ -693,14 +628,23 @@ def main() -> None:
         output,
         args.dataset,
         args.split,
-        train_stats,
+        stats,
         ctrl_adata,
         pert_col,
         control_label,
     )
 
-    _wandb.finish()
+
+SPEC = RunnerSpec(
+    name="scgpt",
+    add_args=_add_args,
+    load_inputs=load_dataset,
+    train_or_load=_train_or_load,
+    predict=_predict,
+    save_predictions=_save_predictions,
+)
 
 
 if __name__ == "__main__":
-    main()
+    from scripts.runner import run
+    run(SPEC)
