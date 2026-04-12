@@ -7,17 +7,18 @@ Benchmarking foundation models for single-cell perturbation prediction. Designed
 ```bash
 git clone https://github.com/mattshu0410/sc-interp.git
 cd sc-interp
-./setup.sh                                # tools + docs + model venvs
-./data/download_norman.sh                 # download + materialise Norman
-./experiments/norman.sh                   # run scGPT + CellFlow end-to-end
+./setup.sh
 ```
 
-Or run one model at a time:
+`setup.sh` builds the tools venv, the docs venv, and one venv per model under `models/<name>/.venv`. On a machine without an NVIDIA driver >= 580 it will install one and prompt you to reboot before re-running.
+
+To run the Norman 2019 benchmark as a quick end-to-end sanity check, pulling our fine-tuned weights from HuggingFace instead of retraining:
 
 ```bash
-source models/scgpt/.venv/bin/activate
-python -m scripts.run scgpt --dataset norman --split test
+./experiments/norman.sh
 ```
+
+This downloads Norman, fetches scGPT and CellFlow weights from HuggingFace, runs inference, and scores both with cell-eval. Results land in `predictions/` and `eval_outputs/`. Takes about 25 minutes on a fresh VM.
 
 ## Motivation
 
