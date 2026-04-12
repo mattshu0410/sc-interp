@@ -1,4 +1,8 @@
-"""HuggingFace Hub upload/download and model-card helpers for runners."""
+"""HuggingFace Hub upload/download and model-card helpers for runners.
+
+Model repos  (repo_type="model"):  try_download / try_upload
+Dataset repos (repo_type="dataset"): try_download_dataset / try_upload_dataset
+"""
 
 from pathlib import Path
 from typing import Any
@@ -47,6 +51,52 @@ def try_upload(repo_id: str, cache_dir: Path, filenames: list[str]) -> None:
             repo_type="model",
         )
     print(f"==> uploaded {filenames} to hf:{repo_id}")
+
+
+def try_download_dataset(repo_id: str, local_dir: Path, filenames: list[str]) -> bool:
+    """Pull the given files from an HF dataset repo into local_dir.
+
+    Returns True on full success, False if the repo or any file is missing.
+    Missing-file errors are tolerated individually so partial downloads still
+    return whatever was available.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
+
+    local_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for name in filenames:
+            try:
+                src = hf_hub_download(repo_id=repo_id, filename=name, repo_type="dataset")
+                Path(src).replace(local_dir / name)
+            except EntryNotFoundError:
+                print(f"==> hf dataset:{repo_id} missing {name}, skipping")
+                return False
+    except RepositoryNotFoundError:
+        print(f"==> hf dataset:{repo_id} does not exist yet")
+        return False
+    print(f"==> pulled {filenames} from hf dataset:{repo_id}")
+    return True
+
+
+def try_upload_dataset(repo_id: str, local_dir: Path, filenames: list[str]) -> None:
+    """Push the given files from local_dir to an HF dataset repo.
+
+    Creates the repo if it doesn't exist. Files are uploaded sequentially so
+    a partial failure still leaves already-uploaded files intact on HF.
+    """
+    from huggingface_hub import HfApi, create_repo
+
+    create_repo(repo_id, exist_ok=True, repo_type="dataset")
+    api = HfApi()
+    for name in filenames:
+        api.upload_file(
+            path_or_fileobj=str(local_dir / name),
+            path_in_repo=name,
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+    print(f"==> uploaded {filenames} to hf dataset:{repo_id}")
 
 
 def build_model_card(
