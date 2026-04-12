@@ -24,4 +24,8 @@ uv pip install \
     "anndata" \
     "scanpy"
 
+# cell-eval is the authoritative benchmark metric set used by
+# scripts/analyse/eval_cell_eval.py and scripts/analyse/paper_metrics.py
+uv pip install cell-eval
+
 echo "==> tools venv ready at $TOOLS_DIR/.venv"
