@@ -18,16 +18,18 @@ from __future__ import annotations
 import importlib
 import sys
 
+from scripts.extractor import ExtractSpec, extract as run_extract
 from scripts.runner import RunnerSpec, run
 
 REGISTRY: dict[str, str] = {
     "scgpt": "scripts.run_scgpt",
     "cellflow": "scripts.run_cellflow",
     "gears": "scripts.run_gears",
+    "extract-scgpt": "scripts.extract_scgpt",
 }
 
 
-def _load_spec(name: str) -> RunnerSpec:
+def _load_spec(name: str) -> RunnerSpec | ExtractSpec:
     """Import the runner module and return its SPEC attribute."""
     module = importlib.import_module(REGISTRY[name])
     if not hasattr(module, "SPEC"):
@@ -61,7 +63,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(2)
 
     spec = _load_spec(runner_name)
-    run(spec, rest)
+    if isinstance(spec, ExtractSpec):
+        run_extract(spec, rest)
+    else:
+        run(spec, rest)
 
 
 if __name__ == "__main__":
