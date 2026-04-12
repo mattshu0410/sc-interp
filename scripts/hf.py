@@ -5,8 +5,9 @@ from typing import Any
 
 
 def try_download(repo_id: str, cache_dir: Path, filenames: list[str]) -> bool:
-    """Pull the given files from HF into cache_dir. False if the repo or
-    any file is missing."""
+    """Pull the given files from HF into cache_dir. Returns True on success,
+    False on a missing repo or a missing file, and prints a message
+    describing which failure mode fired."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 
@@ -15,7 +16,17 @@ def try_download(repo_id: str, cache_dir: Path, filenames: list[str]) -> bool:
         for name in filenames:
             src = hf_hub_download(repo_id=repo_id, filename=name)
             Path(src).replace(cache_dir / name)
-    except (EntryNotFoundError, RepositoryNotFoundError):
+    except RepositoryNotFoundError:
+        print(
+            f"==> hf:{repo_id} does not exist yet "
+            f"(will be created on next upload if training runs)"
+        )
+        return False
+    except EntryNotFoundError:
+        print(
+            f"==> hf:{repo_id} exists but is missing one of {filenames} "
+            f"(will be re-uploaded after training)"
+        )
         return False
     print(f"==> pulled {filenames} from hf:{repo_id}")
     return True
