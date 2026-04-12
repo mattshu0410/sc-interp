@@ -52,6 +52,9 @@ uv pip install "cell-gears<0.0.3" "torch-geometric"
 # Install scgpt itself from source, no-deps to skip scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .
 
+# nnsight wraps any nn.Module for activation extraction without manual hook management
+uv pip install nnsight
+
 # gdown handles the Google Drive folder download for the checkpoint
 uv pip install gdown
 
