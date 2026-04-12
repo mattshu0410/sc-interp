@@ -23,6 +23,7 @@ from scripts.runner import RunnerSpec, run
 REGISTRY: dict[str, str] = {
     "scgpt": "scripts.run_scgpt",
     "cellflow": "scripts.run_cellflow",
+    "gears": "scripts.run_gears",
 }
 
 
