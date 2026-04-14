@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import queue
-import threading
-from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Callable, Protocol
 
 import torch
 
@@ -14,6 +11,20 @@ class ActivationRecord:
     name: str
     tensor: torch.Tensor
     metadata_tags: dict[str, str]
+    # Per-cell sidecars aligned on axis 0 of `tensor`. Typical uses: cell_id,
+    # gene_id, perturbation label, split index. Downstream probing / SAE code
+    # reads these alongside the activation to recover which row came from
+    # where without having to re-join by order.
+    per_cell: dict[str, torch.Tensor] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        n = self.tensor.shape[0]
+        for k, v in self.per_cell.items():
+            if v.shape[0] != n:
+                raise ValueError(
+                    f"per_cell[{k!r}] has axis-0 length {v.shape[0]}, "
+                    f"expected {n} to match tensor.shape[0]"
+                )
 
 
 class ActivationSink(Protocol):
@@ -28,8 +39,6 @@ class ActivationSink(Protocol):
 
 CaptureSpec = tuple[str, Callable[[Any], Any]]
 
-_SENTINEL: object = object()
-
 
 class HookManager:
     def __init__(
@@ -39,62 +48,55 @@ class HookManager:
         sink: ActivationSink,
         capture_dtype: torch.dtype = torch.float32,
         gate: Callable[[dict[str, str]], bool] | None = None,
-        queue_depth: int = 32,
     ) -> None:
         self.nn_model = nn_model
         self.capture = capture
         self.sink = sink
         self.capture_dtype = capture_dtype
         self.gate = gate
-        self.queue_depth = queue_depth
         self.current_tags: dict[str, str] = {}
-        self._queue: queue.Queue[Any] | None = None
-        self._writer: threading.Thread | None = None
-        self._writer_exc: BaseException | None = None
 
     def set_tag(self, key: str, value: str) -> None:
         self.current_tags[key] = value
 
     def __enter__(self) -> HookManager:
-        self._queue = queue.Queue(maxsize=self.queue_depth)
-        self._writer_exc = None
-        self._writer = threading.Thread(
-            target=self._writer_loop, name="HookManagerWriter", daemon=True
-        )
-        self._writer.start()
         return self
 
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        assert self._queue is not None and self._writer is not None
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_val: object,
+        exc_tb: object,
+    ) -> None:
         try:
-            self._queue.put(_SENTINEL)
-            self._writer.join()
-            if self._writer_exc is not None and exc_type is None:
-                raise self._writer_exc
-        finally:
             self.sink.close()
+        except Exception:
+            # A close failure during a propagating exception would mask the
+            # original. Swallow so the caller sees the real error.
+            if exc_type is None:
+                raise
 
-    def _writer_loop(self) -> None:
-        assert self._queue is not None
-        try:
-            while True:
-                item = self._queue.get()
-                if item is _SENTINEL:
-                    return
-                self.sink.write(item)
-        except BaseException as e:
-            self._writer_exc = e
-            while self._queue.get() is not _SENTINEL:
-                pass
+    # The `with self.nn_model.trace(...):` block below must be syntactic:
+    # nnsight 0.5's InterleavingTracer parses the caller's source AST at
+    # enter-time and raises WithBlockNotFoundError if the block is split
+    # across manual __enter__/__exit__ calls or yielded from a generator.
+    # `torch.no_grad` wraps the trace because pure activation capture does
+    # not need autograd graph — skipping it avoids useless memory retention
+    # and makes captures match no_grad replays bit-for-bit.
+    def validate(self, *args: Any, **kwargs: Any) -> None:
+        # Run a probe forward to surface bad accessors, forward-order violations,
+        # and non-tensor proxy results before committing to a full eval loop.
+        # No records are written. Caller supplies a minimal probe input (a
+        # single tiny batch is enough; the forward still runs).
+        with torch.no_grad(), self.nn_model.trace(*args, **kwargs):
+            for _, accessor in self.capture:
+                accessor(self.nn_model).save()
 
-    @contextmanager
-    def trace(self, *args: Any, **kwargs: Any) -> Iterator[None]:
-        assert self._queue is not None, "HookManager.trace called outside with-block"
+    def run(self, *args: Any, **kwargs: Any) -> None:
         saved: list[tuple[str, Any]] = []
-        with self.nn_model.trace(*args, **kwargs):
+        with torch.no_grad(), self.nn_model.trace(*args, **kwargs):
             for name, accessor in self.capture:
                 saved.append((name, accessor(self.nn_model).save()))
-            yield
         tags = dict(self.current_tags)
         if self.gate is not None and not self.gate(tags):
             return
@@ -106,7 +108,13 @@ class HookManager:
                     "expected torch.Tensor — accessor must resolve to a tensor "
                     "(e.g. `.output[0]` for tuple-returning modules)."
                 )
-            tensor = value.detach().to("cpu", dtype=self.capture_dtype)
-            self._queue.put(
+            # `copy=True` guarantees the stored tensor is independent of the
+            # source proxy/buffer even on fp32→fp32 CPU no-ops, so downstream
+            # sinks cannot be invalidated by subsequent forwards reusing
+            # memory.
+            tensor = value.detach().to(
+                "cpu", dtype=self.capture_dtype, copy=True
+            )
+            self.sink.write(
                 ActivationRecord(name=name, tensor=tensor, metadata_tags=tags)
             )
