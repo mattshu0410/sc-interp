@@ -23,7 +23,7 @@ Start with --split test --dtype float16 --max-cells N for smoke-tests.
 
 Output layout (local + HF dataset repo)
 ----------------------------------------
-activations/<dataset>_scgpt/
+data/activations/<dataset>_scgpt/
     layer_00_activations.npy   # (total_positions, d_model)  float32 or float16
     layer_00_gene_ids.npy      # (total_positions,)           int32  — vocab token id
     layer_00_cell_ids.npy      # (total_positions,)           int32  — index into cell list
@@ -56,7 +56,7 @@ from scripts.run_scgpt import DEFAULT_PRETRAINED, REPO_ROOT, build_vocab
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-ACT_ROOT = REPO_ROOT / "activations"
+ACT_ROOT = REPO_ROOT / "data" / "activations"
 PROGRESS_CSV = "upload_progress.csv"
 METADATA_JSON = "extraction_metadata.json"
 CHECKPOINT_JSON = "extraction_checkpoint.json"

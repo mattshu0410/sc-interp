@@ -18,6 +18,12 @@ data/**
 !data/*.sh
 !data/*/manifest.yaml
 
+# Activations: keep the directory tree and .md notes, but not the
+# extracted arrays (those live on HuggingFace).
+!data/activations/*/
+!data/activations/**/*.md
+!data/activations/**/*.csv
+
 # Model artifacts (downloaded via setup scripts)
 _artifacts/
 models/*/checkpoints/
