@@ -20,6 +20,8 @@ Early stopping on val pearson fires first in practice, cells-seen is a
 ceiling.
 """
 
+from __future__ import annotations
+
 import argparse
 import copy
 import json
@@ -27,7 +29,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 import torchtext
 
@@ -38,7 +40,9 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
-from gears import PertData
+
+if TYPE_CHECKING:
+    from gears import PertData
 
 from scgpt.loss import masked_mse_loss
 from scgpt.model import TransformerGenerator
@@ -77,6 +81,8 @@ class ScgptInputs:
 
 def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     """Build GEARS dataloaders for a manifest whose source is 'gears'."""
+    from gears import PertData
+
     pert_data = PertData(str(REPO_ROOT / "data"))
     pert_data.load(data_name=manifest.raw["gears_name"])
     pert_data.prepare_split(

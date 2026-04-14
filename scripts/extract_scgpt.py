@@ -202,6 +202,10 @@ def _load_model(inputs: ScgptExtractInputs, args: argparse.Namespace) -> ScgptEx
         print(f"==> checkpoint unexpected {len(unexpected)} keys (first 3: {unexpected[:3]})")
 
     model.to(device).eval()
+    # Disable nested tensor optimisation so layer outputs are regular tensors
+    # that we can slice by position. Without this, src_key_padding_mask causes
+    # PyTorch 2.3+ to convert inputs to NestedTensors which can't be indexed.
+    model.transformer_encoder.enable_nested_tensor = False
     n_layers = len(model.transformer_encoder.layers)
     d_model = margs["embsize"]
     print(f"==> model ready: {n_layers}L x {margs['nheads']}H x {d_model}D")
@@ -459,7 +463,6 @@ def _extract(
                 gene_ids_t,
                 values=gene_vals_t,
                 src_key_padding_mask=mask_t,
-                fn=raw_model._encode,
             ):
                 layer_saves = [
                     layer.output.save()
@@ -471,6 +474,10 @@ def _extract(
         for layer_idx in layers_to_extract:
             # TransformerEncoderLayer output: (seq_len, batch=1, d_model)
             hidden = layer_saves[layer_idx].value  # tensor
+            # PyTorch 2.3+ TransformerEncoder may return NestedTensors when
+            # src_key_padding_mask is provided; convert back to dense.
+            if hidden.is_nested:
+                hidden = hidden.to_padded_tensor(0.0)
             gene_hidden = hidden[:n_genes, 0, :].cpu().to(
                 torch.float16 if args.dtype == "float16" else torch.float32
             ).numpy()
