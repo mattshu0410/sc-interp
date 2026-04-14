@@ -40,14 +40,34 @@ arrays.
 6. Validator with 3-stage checks.                                                                                  
 7. 1000-cell float32 calibration experiment.                                                                       
                                                                                                                     
+Preprocessing fix: binning (today)
+
+Discovered that the pretrained checkpoint (args.json) was trained with input_style=binned,
+n_bins=51. Norman adata.X contains log1p-normalized floats (range ~0.68–5.4), not bin
+integers — we were passing raw floats through ContinuousValueEncoder, which is
+out-of-distribution relative to pretraining. Fixed by applying scgpt.preprocess.binning()
+per cell before tokenisation: nonzero expressed genes → quantile bins 1..n_bins, zeros
+stay 0. A --n-bins 51 CLI flag was added (defaults to 51, matching the checkpoint).
+
+The 1000-cell calib activations extracted earlier today are invalid (wrong preprocessing)
+and need to be re-extracted once preprocessing decisions are finalised.
+
 Open questions to align on                                
                                                                                                                     
-1. Layer selection. Most mech-interp is layer-by-layer — worth adding --layers 5,6,7 so local dev doesn't need to  
+1. Zero-gene filtering. Currently only nonzero-expressed genes are tokenised (~381/cell).
+Fine-tuning uses include_zero_gene=all (all 5045 Norman genes, randomly subsampled to
+max_seq_len=1200). Including zeros gives the model full gene-context but means ~24% gene
+coverage per cell at max_seq_len=1200. Decision pending before re-running extraction.
+2. Layer selection. Most mech-interp is layer-by-layer — worth adding --layers 5,6,7 so local dev doesn't need to  
 store all 12?
-2. Generalisation to CellFlow / scLDM. These are diffusion-style models with timesteps, not discrete transformer   
+3. Pre-MLP activations. Currently extracting post-MLP layer outputs (layer.output). For
+CLTs, pre-MLP activations (layer.norm1.output) are also needed. Can be captured in the
+same nnsight trace at no extra inference cost — doubles storage. Worth adding alongside
+the post-MLP arrays.
+4. Generalisation to CellFlow / scLDM. These are diffusion-style models with timesteps, not discrete transformer   
 layers, so the layer_XX naming and total_positions concept don't transfer. Proposal: parametrise extractor.py on   
 n_components, d_model, total_positions generically; let each extract_<model>.py own tokenisation + component
 naming. Shared gears/PertData loading can move into scripts/data/gears.py.                                         
-3. Shared GEARS loading. run_scgpt._load_gears and extract_scgpt._load_inputs duplicate PertData.load + 
+5. Shared GEARS loading. run_scgpt._load_gears and extract_scgpt._load_inputs duplicate PertData.load + 
 prepare_split. Consolidating is cheap and makes sense before the next model.  
-4. Extracting fine-tuned models and SAE training. This has proven the pipeline works, next steps are to consider extracting from fine-tuned and training SAEs.
+6. Extracting fine-tuned models and SAE training. This has proven the pipeline works, next steps are to consider extracting from fine-tuned and training SAEs.

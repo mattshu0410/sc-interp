@@ -115,7 +115,7 @@ def _reconstruction_check(
     # Tokenise that cell exactly like extraction does
     row = inputs.pert_data.adata.X[adata_idx]
     expr = np.asarray(row.toarray()).ravel() if hasattr(row, "toarray") else np.asarray(row).ravel()
-    tok = _tokenize_cell(expr, inputs.gene_names, inputs.vocab, model.pad_token_id, args.max_seq_len)
+    tok = _tokenize_cell(expr, inputs.gene_names, inputs.vocab, model.pad_token_id, args.max_seq_len, args.n_bins)
     assert tok is not None, "cell produced no tokens"
 
     # Re-run forward with nnsight, save every layer output
@@ -170,6 +170,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--tag", type=str, default=None,
                    help="suffix matching the extract run's --tag")
+    p.add_argument("--n-bins", type=int, default=51,
+                   help="must match the --n-bins used during extraction")
     p.add_argument("--skip-reconstruction", action="store_true",
                    help="only run structural + distinctness checks (fast)")
     args = p.parse_args()

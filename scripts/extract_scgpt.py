@@ -103,6 +103,13 @@ def _add_args(p: argparse.ArgumentParser) -> None:
         help="optional suffix for the output dir (data/activations/<dataset>_scgpt_<tag>/). "
              "Use this to keep multiple extractions (e.g. dtypes, cell counts) side by side.",
     )
+    p.add_argument(
+        "--n-bins",
+        type=int,
+        default=51,
+        help="number of expression bins for per-cell quantile binning (must match pretraining; "
+             "scGPT whole-human was pretrained with n_bins=51)",
+    )
 
 
 # ── Load inputs ───────────────────────────────────────────────────────────────
@@ -231,23 +238,33 @@ def _tokenize_cell(
     vocab: Any,
     pad_token_id: int,
     max_seq_len: int,
+    n_bins: int = 51,
 ) -> dict | None:
     """Convert a raw expression vector into scGPT token inputs.
 
+    Applies per-cell quantile binning (matching scGPT pretraining: input_style=binned,
+    n_bins=51) before tokenisation. Zero-expression genes are assigned bin 0 and
+    excluded from the token sequence; expressed genes receive bins 1..n_bins.
+
     Returns None if no expressed genes map to the vocab.
-    Token order: sorted descending by expression (scGPT convention).
+    Token order: sorted descending by bin value (scGPT convention).
     """
-    nonzero_idx = np.where(expr > 0)[0]
-    if len(nonzero_idx) == 0:
+    from scgpt.preprocess import binning as scgpt_bin
+
+    # Per-cell quantile binning over the full expression vector.
+    # Zeros stay 0 (not expressed); nonzero values → bins 1..n_bins.
+    binned = scgpt_bin(expr, n_bins)  # np.ndarray int64, same shape as expr
+
+    expressed_idx = np.where(binned > 0)[0]
+    if len(expressed_idx) == 0:
         return None
 
-    token_ids, values, names = [], [], []
-    for idx in nonzero_idx:
+    token_ids, values = [], []
+    for idx in expressed_idx:
         gname = gene_names[idx]
         if gname in vocab:
             token_ids.append(vocab[gname])
-            values.append(float(expr[idx]))
-            names.append(gname)
+            values.append(float(binned[idx]))
 
     if not token_ids:
         return None
@@ -371,7 +388,7 @@ def _extract(
             expr = np.asarray(row).ravel()
 
         tok = _tokenize_cell(
-            expr, gene_names, vocab, model.pad_token_id, args.max_seq_len
+            expr, gene_names, vocab, model.pad_token_id, args.max_seq_len, args.n_bins
         )
         if tok is not None:
             all_tok.append(tok)
