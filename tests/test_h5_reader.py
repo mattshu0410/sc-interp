@@ -55,11 +55,15 @@ def test_reader_meta_exposes_required_fields(tmp_path: Path) -> None:
 def test_reader_round_trip_activation_and_labels(tmp_path: Path) -> None:
     path = tmp_path / "act.h5"
     _write_fixture(path)
+
+    # Reproduce the fixture's writes to compare against.
+    torch.manual_seed(0)
+    expected_acts = torch.cat([torch.randn(3, 8) + i for i in range(2)])
+
     with H5ActivationReader(path) as r:
         act, labels = r.read("blocks.0.attn", {"phase": "predict"})
-        assert act.shape == (6, 8)
+        assert torch.equal(act, expected_acts)
         assert set(labels) == {"cell_id"}
-        assert labels["cell_id"].shape == (6,)
         assert torch.equal(labels["cell_id"], torch.tensor([0, 1, 2, 10, 11, 12]))
 
 

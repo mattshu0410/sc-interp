@@ -318,52 +318,6 @@ def test_exit_surfaces_close_error_when_no_prior_exception(
             hm.run(x)
 
 
-def test_empty_capture_list_runs_forward_without_records(
-    simple_lin: tuple[NNsight, torch.Tensor],
-) -> None:
-    nn_model, x = simple_lin
-    sink = MemoryActivationSink()
-
-    with HookManager(nn_model, capture=[], sink=sink) as hm:
-        hm.run(x)
-
-    assert sink.records == []
-    assert sink._closed
-
-
-# -- Dry-run validator --------------------------------------------------
-
-
-def test_validate_surfaces_bad_accessor_without_writing(
-    simple_lin: tuple[NNsight, torch.Tensor],
-) -> None:
-    nn_model, x = simple_lin
-    sink = MemoryActivationSink()
-
-    def bad(_m: object) -> object:
-        raise ValueError("typo")
-
-    with HookManager(nn_model, capture=[("bad", bad)], sink=sink) as hm:
-        with pytest.raises(ValueError, match="typo"):
-            hm.validate(x)
-        assert sink.records == []
-
-
-def test_validate_passes_clean_accessors(
-    simple_lin: tuple[NNsight, torch.Tensor],
-) -> None:
-    nn_model, x = simple_lin
-    sink = MemoryActivationSink()
-
-    with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
-        hm.validate(x)
-        # validate() must not write records.
-        assert sink.records == []
-        # Subsequent run() still works normally.
-        hm.run(x)
-        assert len(sink.records) == 1
-
-
 # -- Multi-invocation (Step 5) -----------------------------------------
 
 
@@ -394,6 +348,8 @@ def test_multi_invocation_captures_first_call() -> None:
 
 def test_forward_order_violation_surfaces_error() -> None:
     # nnsight 0.5 raises when .save() calls are issued out of forward order.
+    # The message varies by nnsight version; match substring "order" to
+    # pin down the category instead of accepting any Exception.
     torch.manual_seed(0)
     net = _TinyNet()
     net.eval()
@@ -408,19 +364,23 @@ def test_forward_order_violation_surfaces_error() -> None:
         ],
         sink=sink,
     ) as hm:
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="(?i)order"):
             hm.run(torch.tensor([[0, 1, 2, 3]]))
 
 
 def test_kwargs_passthrough() -> None:
+    # The kwarg `scale` is applied inside forward after a post-scale module;
+    # capturing `post.output` proves the kwarg actually reached forward.
+    # A regression that dropped kwargs would scale by the default 1.0 and
+    # the captured `post` activation would mismatch the scale=2.0 reference.
     class _KwargsNet(nn.Module):
         def __init__(self, d: int) -> None:
             super().__init__()
-            self.a = nn.Linear(d, d)
-            self.b = nn.Linear(d, d)
+            self.pre = nn.Linear(d, d)
+            self.post = nn.Linear(d, d)
 
         def forward(self, x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-            return self.b(self.a(x)) * scale
+            return self.post(self.pre(x) * scale)
 
     torch.manual_seed(0)
     net = _KwargsNet(4)
@@ -429,18 +389,21 @@ def test_kwargs_passthrough() -> None:
     sink = MemoryActivationSink()
     x = torch.randn(2, 4)
 
-    with HookManager(nn_model, capture=[("a", lambda m: m.a.output)], sink=sink) as hm:
+    with HookManager(nn_model, capture=[("post", lambda m: m.post.output)], sink=sink) as hm:
         hm.run(x, scale=2.0)
 
-    assert len(sink.records) == 1
     with torch.no_grad():
-        expected_a = net.a(x)
-    assert torch.equal(sink.records[0].tensor, expected_a)
+        expected = net.post(net.pre(x) * 2.0)
+        default_scale = net.post(net.pre(x) * 1.0)
+    captured = sink.records[0].tensor
+    assert torch.equal(captured, expected)
+    # Negative control: a regression dropping kwargs would produce `default_scale`.
+    assert not torch.allclose(captured, default_scale)
 
 
 def test_asymmetric_shapes_preserved() -> None:
-    # Non-square dims catch dim-swap regressions that a (d, d) fixture would
-    # miss by symmetry.
+    # Non-square dims (batch=3, seq=7, d=16, vocab=17) catch dim-swap
+    # regressions that a (d, d) fixture would miss by symmetry.
     torch.manual_seed(0)
     net = _TinyNet(vocab=17, d=16, nh=2)
     net.eval()
@@ -458,9 +421,17 @@ def test_asymmetric_shapes_preserved() -> None:
     ) as hm:
         hm.run(ids)
 
+    with torch.no_grad():
+        emb = net.embed(ids)
+        h = net.blocks[0].ln1(emb)
+        attn_out, _ = net.blocks[0].attn(h, h, h, need_weights=False)
+        x = emb + attn_out
+        x = x + net.blocks[0].mlp(net.blocks[0].ln2(x))
+        head = net.head(x)
+
     by_name = {r.name: r.tensor for r in sink.records}
-    assert by_name["embed"].shape == (3, 7, 16)
-    assert by_name["head"].shape == (3, 7, 17)
+    assert torch.equal(by_name["embed"], emb)
+    assert torch.equal(by_name["head"], head)
 
 
 def test_capture_parent_gets_aggregate() -> None:

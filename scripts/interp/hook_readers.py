@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.interp.hook_sinks import H5ActivationSink
+from scripts.interp.hook_sinks import H5ActivationSink, group_path
 
 
 class H5ActivationReader:
@@ -60,13 +60,13 @@ class H5ActivationReader:
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         self._require_open()
         assert self._file is not None
-        group_path = H5ActivationSink._group_path(name, tags or {})
-        act_path = f"{group_path}/activation"
+        gpath = group_path(name, tags or {})
+        act_path = f"{gpath}/activation"
         if act_path not in self._file:
             raise KeyError(f"no activation at {act_path}")
         activation = torch.from_numpy(self._file[act_path][...])
         labels: dict[str, torch.Tensor] = {}
-        labels_path = f"{group_path}/labels"
+        labels_path = f"{gpath}/labels"
         if labels_path in self._file:
             labels_grp = self._file[labels_path]
             for label_name in labels_grp.keys():

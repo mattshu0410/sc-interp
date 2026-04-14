@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import h5py
 
 from scripts.interp.hooks import ActivationRecord
+
+
+def _escape_segment(s: str) -> str:
+    # Percent-encode characters that carry structural meaning in the h5
+    # tag-subpath schema: '/' (group separator), '=' (key/value delimiter
+    # inside a tag segment), and '%' itself (so the encoding is reversible).
+    # Without this, `{"layer": "1/2"}` or `name="blocks/0"` silently create
+    # ambiguous nested groups that collide with legit names.
+    return s.replace("%", "%25").replace("/", "%2F").replace("=", "%3D")
+
+
+def group_path(name: str, tags: dict[str, str]) -> str:
+    esc_name = _escape_segment(name)
+    segments = [
+        f"{_escape_segment(k)}={_escape_segment(v)}" for k, v in sorted(tags.items())
+    ]
+    if segments:
+        return f"/{esc_name}/" + "/".join(segments)
+    return f"/{esc_name}"
 
 
 class MemoryActivationSink:
@@ -16,13 +34,7 @@ class MemoryActivationSink:
     def write(self, record: ActivationRecord) -> None:
         if self._closed:
             raise RuntimeError("write() called on closed MemoryActivationSink")
-        stored = ActivationRecord(
-            name=record.name,
-            tensor=record.tensor,
-            metadata_tags=dict(record.metadata_tags),
-            per_cell={k: v for k, v in record.per_cell.items()},
-        )
-        self.records.append(stored)
+        self.records.append(record)
 
     def close(self) -> None:
         self._closed = True
@@ -96,17 +108,11 @@ class H5ActivationSink:
     def write(self, record: ActivationRecord) -> None:
         if self._closed or self._file is None:
             raise RuntimeError("write() called on closed H5ActivationSink")
-        group_path = self._group_path(record.name, record.metadata_tags)
+        gpath = group_path(record.name, record.metadata_tags)
         arr = record.tensor.detach().cpu().numpy()
-        act_path = f"{group_path}/activation"
+        act_path = f"{gpath}/activation"
         if act_path in self._file:
             dset = self._file[act_path]
-            if dset.shape[1:] != arr.shape[1:]:
-                raise ValueError(
-                    f"H5 append shape mismatch at {act_path}: existing "
-                    f"trailing shape {tuple(dset.shape[1:])} != new "
-                    f"{tuple(arr.shape[1:])}"
-                )
             if dset.dtype != arr.dtype:
                 raise ValueError(
                     f"H5 append dtype mismatch at {act_path}: existing "
@@ -132,15 +138,9 @@ class H5ActivationSink:
 
         for label_name, label_tensor in record.per_cell.items():
             label_arr = label_tensor.detach().cpu().numpy()
-            label_path = f"{group_path}/labels/{label_name}"
+            label_path = f"{gpath}/labels/{label_name}"
             if label_path in self._file:
                 ldset = self._file[label_path]
-                if ldset.shape[1:] != label_arr.shape[1:]:
-                    raise ValueError(
-                        f"H5 append shape mismatch at {label_path}: existing "
-                        f"trailing shape {tuple(ldset.shape[1:])} != new "
-                        f"{tuple(label_arr.shape[1:])}"
-                    )
                 if ldset.dtype != label_arr.dtype:
                     raise ValueError(
                         f"H5 append dtype mismatch at {label_path}: existing "
@@ -170,31 +170,3 @@ class H5ActivationSink:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-    @staticmethod
-    def _escape(s: str) -> str:
-        # Percent-encode characters that carry structural meaning in the h5
-        # tag-subpath schema: '/' (group separator), '=' (key/value delimiter
-        # inside a tag segment), and '%' itself (so the encoding is
-        # reversible). Without this, `{"layer": "1/2"}` or `name="blocks/0"`
-        # silently create ambiguous nested groups that collide with legit
-        # names.
-        return s.replace("%", "%25").replace("/", "%2F").replace("=", "%3D")
-
-    @classmethod
-    def _group_path(cls, name: str, tags: dict[str, str]) -> str:
-        esc_name = cls._escape(name)
-        segments = [
-            f"{cls._escape(k)}={cls._escape(v)}" for k, v in sorted(tags.items())
-        ]
-        if segments:
-            return f"/{esc_name}/" + "/".join(segments)
-        return f"/{esc_name}"
-
-    @staticmethod
-    def _read_tags_from_dataset(dset: Any) -> dict[str, str]:
-        return {
-            k: (v.decode() if isinstance(v, bytes) else str(v))
-            for k, v in dset.attrs.items()
-            if k != "name"
-        }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 import torch
 
@@ -27,16 +27,9 @@ class ActivationRecord:
                 )
 
 
-class ActivationSink(Protocol):
-    def write(self, record: ActivationRecord) -> None: ...
-
-    def close(self) -> None: ...
-
-    def __enter__(self) -> ActivationSink: ...
-
-    def __exit__(self, *exc: object) -> None: ...
-
-
+# Sinks are duck-typed: any object with `write(record) / close() / context-
+# manager protocol` works. MemoryActivationSink and H5ActivationSink are the
+# two in-repo implementations.
 CaptureSpec = tuple[str, Callable[[Any], Any]]
 
 
@@ -45,7 +38,7 @@ class HookManager:
         self,
         nn_model: Any,
         capture: list[CaptureSpec],
-        sink: ActivationSink,
+        sink: Any,
         capture_dtype: torch.dtype = torch.float32,
         gate: Callable[[dict[str, str]], bool] | None = None,
     ) -> None:
@@ -83,15 +76,6 @@ class HookManager:
     # `torch.no_grad` wraps the trace because pure activation capture does
     # not need autograd graph — skipping it avoids useless memory retention
     # and makes captures match no_grad replays bit-for-bit.
-    def validate(self, *args: Any, **kwargs: Any) -> None:
-        # Run a probe forward to surface bad accessors, forward-order violations,
-        # and non-tensor proxy results before committing to a full eval loop.
-        # No records are written. Caller supplies a minimal probe input (a
-        # single tiny batch is enough; the forward still runs).
-        with torch.no_grad(), self.nn_model.trace(*args, **kwargs):
-            for _, accessor in self.capture:
-                accessor(self.nn_model).save()
-
     def run(self, *args: Any, **kwargs: Any) -> None:
         saved: list[tuple[str, Any]] = []
         with torch.no_grad(), self.nn_model.trace(*args, **kwargs):
