@@ -1,0 +1,5 @@
+# Normalise line endings: text files get LF in the repo and on checkout.
+* text=auto
+
+# Shell scripts must always be LF or bash will fail with \r errors.
+*.sh text eol=lf
