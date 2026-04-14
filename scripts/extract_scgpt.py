@@ -96,6 +96,13 @@ def _add_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="cap number of cells extracted (useful for smoke-tests)",
     )
+    p.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="optional suffix for the output dir (data/activations/<dataset>_scgpt_<tag>/). "
+             "Use this to keep multiple extractions (e.g. dtypes, cell counts) side by side.",
+    )
 
 
 # ── Load inputs ───────────────────────────────────────────────────────────────
@@ -350,7 +357,10 @@ def _extract(
     )
 
     # ── Output directory ──────────────────────────────────────────────────────
-    out_dir = ACT_ROOT / f"{args.dataset}_scgpt"
+    dir_name = f"{args.dataset}_scgpt"
+    if getattr(args, "tag", None):
+        dir_name = f"{dir_name}_{args.tag}"
+    out_dir = ACT_ROOT / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Pre-tokenise all cells ────────────────────────────────────────────────
