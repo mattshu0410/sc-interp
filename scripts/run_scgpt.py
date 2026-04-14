@@ -81,14 +81,9 @@ class ScgptInputs:
 
 def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     """Build GEARS dataloaders for a manifest whose source is 'gears'."""
-    from gears import PertData
+    from scripts.data.gears import load_pert_data
 
-    pert_data = PertData(str(REPO_ROOT / "data"))
-    pert_data.load(data_name=manifest.raw["gears_name"])
-    pert_data.prepare_split(
-        split=manifest.raw.get("split", {}).get("default", args.split_type),
-        seed=args.seed,
-    )
+    pert_data = load_pert_data(manifest, split_type=args.split_type, seed=args.seed)
     pert_data.get_dataloader(
         batch_size=args.batch_size, test_batch_size=args.eval_batch_size
     )

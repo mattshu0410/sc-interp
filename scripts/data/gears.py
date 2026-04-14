@@ -22,6 +22,32 @@ from scripts.data.splits import write_split
 from scripts.manifest import REPO_ROOT, Manifest
 
 
+def load_pert_data(
+    manifest: Manifest,
+    split_type: str = "simulation",
+    seed: int = 42,
+) -> "PertData":
+    """Load and prepare a GEARS PertData for a manifest whose source is 'gears'.
+
+    Shared entry point for run_scgpt and extract_scgpt. Returns the PertData
+    after load + prepare_split. Callers add dataloaders or gene-name lookups
+    themselves as needed.
+
+    The gears import is lazy so this module is safe to import from venvs that
+    lack gears (only calling this function requires it).
+    """
+    from gears import PertData
+
+    gears_name = manifest.raw["gears_name"]
+    default_split = manifest.raw.get("split", {}).get("default", split_type)
+
+    print("==> loading dataset via GEARS...")
+    pert_data = PertData(str(REPO_ROOT / "data"))
+    pert_data.load(data_name=gears_name)
+    pert_data.prepare_split(split=default_split, seed=seed)
+    return pert_data
+
+
 def materialise(
     manifest: Manifest,
     split_type: str = "simulation",
@@ -52,8 +78,25 @@ def materialise(
     print(f"==> materialising gears split for {manifest.name} ({gears_name})")
     print(f"    split_type={split_type}, seed={seed}, tgss={train_gene_set_size}")
 
+    # GEARS skips its download if the dataset directory already exists, even when
+    # only repo-tracked files (e.g. manifest.yaml) are present.  Work around this
+    # by temporarily hiding the directory so GEARS fetches the zip from Dataverse.
+    dataset_dir = data_dir / gears_name
+    h5ad_path = dataset_dir / "perturb_processed.h5ad"
+    stashed: dict[str, bytes] = {}
+    if dataset_dir.exists() and not h5ad_path.exists():
+        print(f"    dataset dir exists but h5ad missing — stashing repo files so GEARS will download")
+        for p in list(dataset_dir.iterdir()):
+            stashed[p.name] = p.read_bytes()
+            p.unlink()
+        dataset_dir.rmdir()
+
     pert_data = PertData(str(data_dir))
     pert_data.load(data_name=gears_name)
+
+    # Restore any stashed repo files (e.g. manifest.yaml)
+    for name, content in stashed.items():
+        (dataset_dir / name).write_bytes(content)
     pert_data.prepare_split(
         split=split_type,
         seed=seed,

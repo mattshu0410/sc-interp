@@ -116,16 +116,9 @@ class ScgptExtractInputs:
 
 
 def _load_inputs(manifest: Manifest, args: argparse.Namespace) -> ScgptExtractInputs:
-    from gears import PertData
+    from scripts.data.gears import load_pert_data
 
-    print("==> loading dataset via GEARS...")
-    pert_data = PertData(str(REPO_ROOT / "data"))
-    pert_data.load(data_name=manifest.raw["gears_name"])
-    pert_data.prepare_split(
-        split=manifest.raw.get("split", {}).get("default", "simulation"),
-        seed=args.seed,
-    )
-
+    pert_data = load_pert_data(manifest, seed=args.seed)
     vocab = build_vocab(args.pretrained_dir / "vocab.json")
 
     gene_symbol_col = manifest.var.gene_symbol_column if manifest.var else None
