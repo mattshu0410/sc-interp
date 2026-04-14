@@ -475,13 +475,13 @@ def _extract(
         gene_token_ids = tok["gene_token_ids"]  # (n_genes,) int32
 
         for layer_idx in layers_to_extract:
-            # TransformerEncoderLayer output: (seq_len, batch=1, d_model)
+            # batch_first=True → shape is (batch=1, seq, d_model)
             hidden = layer_saves[layer_idx].value  # tensor
             # PyTorch 2.3+ TransformerEncoder may return NestedTensors when
             # src_key_padding_mask is provided; convert back to dense.
             if hidden.is_nested:
                 hidden = hidden.to_padded_tensor(0.0)
-            gene_hidden = hidden[:n_genes, 0, :].cpu().to(
+            gene_hidden = hidden[0, :n_genes, :].cpu().to(
                 torch.float16 if args.dtype == "float16" else torch.float32
             ).numpy()
             act_maps[layer_idx][pos_written : pos_written + n_genes] = gene_hidden

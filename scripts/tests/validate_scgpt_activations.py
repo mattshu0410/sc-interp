@@ -145,7 +145,7 @@ def _reconstruction_check(
         hidden = layer_saves[layer].value
         if hidden.is_nested:
             hidden = hidden.to_padded_tensor(0.0)
-        fresh = hidden[:n_genes, 0, :].cpu().to(torch.float32).numpy()
+        fresh = hidden[0, :n_genes, :].cpu().to(torch.float32).numpy()
 
         stored = np.asarray(
             np.load(out_dir / f"layer_{layer:02d}_activations.npy", mmap_mode="r")[stored_slice]
