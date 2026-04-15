@@ -133,6 +133,8 @@ class H5ActivationSink:
                 compression_opts=self.compression_opts,
             )
             dset.attrs["name"] = record.name
+            if record.layout:
+                dset.attrs["layout"] = record.layout
             for k, v in record.metadata_tags.items():
                 dset.attrs[k] = v
 

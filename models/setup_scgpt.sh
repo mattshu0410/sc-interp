@@ -52,6 +52,11 @@ uv pip install "cell-gears<0.0.3" "torch-geometric"
 # Install scgpt itself from source, no-deps to skip scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .
 
+# Activation capture (scripts/interp/) — nnsight wraps the model for tracing,
+# h5py is the on-disk sink. nnsight 0.5.x source-AST tracer is what HookManager
+# is built against; pin range bumps need a re-check (see project memory).
+uv pip install "nnsight>=0.5,<0.6" "h5py"
+
 # gdown handles the Google Drive folder download for the checkpoint
 uv pip install gdown
 

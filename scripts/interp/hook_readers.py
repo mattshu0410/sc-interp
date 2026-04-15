@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from scripts.interp.hook_sinks import H5ActivationSink, group_path
+from scripts.interp.hooks import Layout  # re-exported for callers
 
 
 class H5ActivationReader:
@@ -54,6 +55,18 @@ class H5ActivationReader:
         if isinstance(names, list):
             return names
         return [str(names)]
+
+    def layout(self, name: str, tags: dict[str, str] | None = None) -> Layout:
+        self._require_open()
+        assert self._file is not None
+        gpath = group_path(name, tags or {})
+        act_path = f"{gpath}/activation"
+        if act_path not in self._file:
+            raise KeyError(f"no activation at {act_path}")
+        attr = self._file[act_path].attrs.get("layout", "")
+        if isinstance(attr, bytes):
+            attr = attr.decode()
+        return str(attr)  # type: ignore[return-value]
 
     def read(
         self, name: str, tags: dict[str, str] | None = None

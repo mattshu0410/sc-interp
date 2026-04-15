@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 import torch
 from gears import PertData
+from nnsight import NNsight
 
 from scgpt.loss import masked_mse_loss
 from scgpt.model import TransformerGenerator
@@ -48,6 +49,9 @@ from scgpt.utils import compute_perturbation_metrics, set_seed
 
 from scripts import wb
 from scripts.cache import TrainStats, cache_or_train
+from scripts.interp.hook_sinks import H5ActivationSink
+from scripts.interp.hooks import HookManager
+from scripts.interp.scgpt_inputs import scatter_back
 from scripts.manifest import Manifest
 from scripts.runner import RunnerSpec
 
@@ -187,22 +191,35 @@ def load_finetuned_weights(
 # ── Training ──────────────────────────────────────────────────────────────────
 
 
-def forward_pass(
-    model: TransformerGenerator,
+@dataclass
+class ScgptForwardArgs:
+    """Inputs to TransformerGenerator.forward + per-batch slice metadata.
+
+    `input_gene_ids` is the column index slice into the (batch, n_genes)
+    expression vector — needed by the predict path to scatter `mlm_output`
+    back into a full-width prediction tensor (see pred_perturb).
+    """
+    mapped_input_gene_ids: torch.Tensor
+    input_values: torch.Tensor
+    input_pert_flags: torch.Tensor
+    src_key_padding_mask: torch.Tensor
+    target_values: torch.Tensor
+    input_gene_ids: torch.Tensor
+    n_genes: int
+
+
+def build_forward_args(
     batch_data,
     gene_ids: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
-    amp: bool,
     max_seq_len: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Replicates the body of pred_perturb but keeps gradients enabled.
+) -> ScgptForwardArgs:
+    """Prepare per-batch model inputs the way pred_perturb does.
 
-    Clips the input gene set to max_seq_len via random subsampling when
-    include_zero_gene="all", matching the tutorial's training recipe.
-    Without this the attention memory blows up on datasets with more
-    genes than the model's sequence length (Norman has 5045 genes vs
-    max_seq_len 1200).
+    Random-subsamples the gene axis to max_seq_len when include_zero_gene="all"
+    — Norman has 5045 genes vs max_seq_len 1200, attention memory blows up
+    otherwise. Each batch sees a different gene window.
     """
     batch_size = len(batch_data.y)
     batch_data.to(device)
@@ -234,19 +251,42 @@ def forward_pass(
     src_key_padding_mask = torch.zeros_like(
         input_values, dtype=torch.bool, device=device
     )
+    return ScgptForwardArgs(
+        mapped_input_gene_ids=mapped_input_gene_ids,
+        input_values=input_values,
+        input_pert_flags=input_pert_flags,
+        src_key_padding_mask=src_key_padding_mask,
+        target_values=target_values,
+        input_gene_ids=input_gene_ids,
+        n_genes=n_genes,
+    )
 
+
+def forward_pass(
+    model: TransformerGenerator,
+    batch_data,
+    gene_ids: np.ndarray,
+    include_zero_gene: str,
+    device: torch.device,
+    amp: bool,
+    max_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Train-time forward: prep inputs, run under AMP, return mlm/target/input."""
+    fa = build_forward_args(
+        batch_data, gene_ids, include_zero_gene, device, max_seq_len
+    )
     with torch.cuda.amp.autocast(enabled=amp):
         output_dict = model(
-            mapped_input_gene_ids,
-            input_values,
-            input_pert_flags,
-            src_key_padding_mask=src_key_padding_mask,
+            fa.mapped_input_gene_ids,
+            fa.input_values,
+            fa.input_pert_flags,
+            src_key_padding_mask=fa.src_key_padding_mask,
             CLS=False,
             CCE=False,
             MVC=False,
             ECS=False,
         )
-    return output_dict["mlm_output"], target_values, input_values
+    return output_dict["mlm_output"], fa.target_values, fa.input_values
 
 
 @torch.no_grad()
@@ -491,6 +531,89 @@ def predict(
     }
 
 
+@torch.no_grad()
+def predict_with_capture(
+    model: TransformerGenerator,
+    loader: Iterable,
+    gene_ids: np.ndarray,
+    include_zero_gene: str,
+    device: torch.device,
+    max_seq_len: int,
+    activation_out: Path,
+    capture_dtype: torch.dtype,
+    dataset: str,
+    split: str,
+) -> dict:
+    """predict() variant that captures per-layer hidden states via HookManager.
+
+    Mirrors pred_perturb's input prep + scatter-back, but the forward goes
+    through nnsight so transformer_encoder.layers[i].output is captured per
+    batch into an HDF5 sink. Capture path runs fp32 (no autocast) for stable
+    downstream probe/SAE/reconstruction tolerances.
+    """
+    model.eval()
+    n_layers = len(model.transformer_encoder.layers)
+    # Per-layer hidden-state captures in forward order; layout BTD because
+    # TransformerEncoderLayer with batch_first=True emits (batch, seq, dim).
+    targets = [
+        (
+            f"transformer_encoder.layers.{i}",
+            lambda m, i=i: m.transformer_encoder.layers[i].output,
+            "BTD",
+        )
+        for i in range(n_layers)
+    ]
+    nn_model = NNsight(model)
+
+    pert_cat: list[str] = []
+    preds: list[torch.Tensor] = []
+    truths: list[torch.Tensor] = []
+
+    sink = H5ActivationSink(
+        activation_out,
+        runner="scgpt",
+        dataset=dataset,
+        split=split,
+        capture_names=[name for name, *_ in targets],
+    )
+    with sink, HookManager(
+        nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
+    ) as hm:
+        hm.set_tag("phase", "predict")
+        cell_offset = 0
+        for batch in loader:
+            pert_cat.extend(batch.pert)
+            fa = build_forward_args(
+                batch, gene_ids, include_zero_gene, device, max_seq_len
+            )
+            bs = fa.input_values.shape[0]
+            hm.set_per_cell({
+                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+            })
+            output_dict = hm.run(
+                fa.mapped_input_gene_ids,
+                fa.input_values,
+                fa.input_pert_flags,
+                src_key_padding_mask=fa.src_key_padding_mask,
+                CLS=False,
+                CCE=False,
+                MVC=False,
+                ECS=False,
+                do_sample=True,
+            )
+            output_values = output_dict["mlm_output"].float()
+            pred_full = scatter_back(output_values, fa.input_gene_ids, fa.n_genes)
+            preds.extend(pred_full.cpu())
+            truths.extend(batch.y.cpu())
+            cell_offset += bs
+
+    return {
+        "pert": np.array(pert_cat),
+        "pred": torch.stack(preds).numpy().astype(np.float32),
+        "truth": torch.stack(truths).numpy().astype(np.float32),
+    }
+
+
 def save_predictions(
     results: dict,
     var: pd.DataFrame,
@@ -596,15 +719,39 @@ def _train_or_load(
 def _predict(
     trained: ScgptTrained, inputs: ScgptInputs, args: argparse.Namespace
 ) -> dict:
-    """Run pred_perturb over the requested split and return the results dict."""
+    """Run pred_perturb over the requested split and return the results dict.
+
+    With --capture-activations, swaps the inner forward for an nnsight-traced
+    one that streams per-layer hidden states to args.activation_out.
+    """
     loader = {
         "train": inputs.train_loader,
         "val": inputs.val_loader,
         "test": inputs.test_loader,
     }[args.split]
     print(f"==> running inference on {args.split} split")
-    return predict(
-        trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
+    if not args.capture_activations:
+        return predict(
+            trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
+        )
+    activation_out = args.activation_out or (
+        REPO_ROOT
+        / "predictions"
+        / f"scgpt_{args.dataset}_{args.split}.activations.h5"
+    )
+    capture_dtype = {"fp32": torch.float32, "fp16": torch.float16}[args.capture_dtype]
+    print(f"==> capturing activations to {activation_out} (dtype={args.capture_dtype})")
+    return predict_with_capture(
+        trained.model,
+        loader,
+        trained.gene_ids,
+        args.include_zero_gene,
+        trained.device,
+        args.max_seq_len,
+        activation_out,
+        capture_dtype,
+        args.dataset,
+        args.split,
     )
 
 
