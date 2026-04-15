@@ -27,11 +27,14 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
+from nnsight import NNsight
 
 from gears import GEARS, PertData
 
 from scripts import wb
 from scripts.cache import TrainStats, cache_or_train
+from scripts.interp.hook_sinks import H5ActivationSink, default_activation_out
+from scripts.interp.hooks import HookManager
 from scripts.manifest import Manifest
 from scripts.runner import RunnerSpec
 
@@ -187,6 +190,71 @@ def predict(model: GEARS, loader: Iterable, device: torch.device) -> dict:
     }
 
 
+@torch.no_grad()
+def predict_with_capture(
+    model: GEARS,
+    loader: Iterable,
+    device: torch.device,
+    activation_out: Path,
+    capture_dtype: torch.dtype,
+    dataset: str,
+    split: str,
+) -> dict:
+    """predict() variant that captures GEARS submodule outputs via HookManager.
+
+    pert_fuse is excluded from targets — it's skipped entirely when a batch is
+    all-controls (GEARS_Model.forward:166 empty-pert_index guard), and a
+    mandatory .save() on an uncalled module errors at trace exit.
+    """
+    best = model.best_model
+    best.eval()
+    best.to(device)
+
+    # Forward order per GEARS_Model.forward; nnsight 0.5 raises OutOfOrderError
+    # if .save() calls aren't in execution order.
+    targets = [
+        ("gene_emb",        lambda m: m.gene_emb.output),
+        ("emb_pos",         lambda m: m.emb_pos.output),
+        *[(f"layers_emb_pos.{i}", lambda m, i=i: m.layers_emb_pos[i].output)
+          for i in range(len(best.layers_emb_pos))],
+        ("emb_trans_v2",    lambda m: m.emb_trans_v2.output),
+        ("pert_emb",        lambda m: m.pert_emb.output),
+        *[(f"sim_layers.{i}", lambda m, i=i: m.sim_layers[i].output)
+          for i in range(len(best.sim_layers))],
+        ("recovery_w",      lambda m: m.recovery_w.output),
+        ("cross_gene_state", lambda m: m.cross_gene_state.output),
+    ]
+    nn_model = NNsight(best)
+
+    pert_cat: list[str] = []
+    preds: list[torch.Tensor] = []
+    truths: list[torch.Tensor] = []
+
+    sink = H5ActivationSink(
+        activation_out,
+        runner="gears",
+        dataset=dataset,
+        split=split,
+        capture_names=[name for name, *_ in targets],
+    )
+    with sink, HookManager(
+        nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
+    ) as hm:
+        hm.set_tag("phase", "predict")
+        for batch in loader:
+            batch.to(device)
+            pert_cat.extend(batch.pert)
+            p = hm.run(batch)
+            preds.extend(p.cpu())
+            truths.extend(batch.y.cpu())
+
+    return {
+        "pert": np.array(pert_cat),
+        "pred": torch.stack(preds).numpy().astype(np.float32),
+        "truth": torch.stack(truths).numpy().astype(np.float32),
+    }
+
+
 def save_predictions(
     results: dict,
     var: pd.DataFrame,
@@ -281,7 +349,11 @@ def _train_or_load(
 def _predict(
     model: GEARS, inputs: GearsInputs, args: argparse.Namespace
 ) -> dict:
-    """Run per-cell inference on the requested split."""
+    """Run per-cell inference on the requested split.
+
+    With --capture-activations, swaps the inner forward for an nnsight-traced
+    one that streams submodule outputs to args.activation_out.
+    """
     loader = {
         "train": inputs.pert_data.dataloader["train_loader"],
         "val": inputs.pert_data.dataloader["val_loader"],
@@ -289,7 +361,22 @@ def _predict(
     }[args.split]
     device = next(model.best_model.parameters()).device
     print(f"==> running inference on {args.split} split")
-    return predict(model, loader, device)
+    if not args.capture_activations:
+        return predict(model, loader, device)
+    activation_out = args.activation_out or default_activation_out(
+        REPO_ROOT, "gears", args.dataset, args.split
+    )
+    capture_dtype = {"fp32": torch.float32, "fp16": torch.float16}[args.capture_dtype]
+    print(f"==> capturing activations to {activation_out} (dtype={args.capture_dtype})")
+    return predict_with_capture(
+        model,
+        loader,
+        device,
+        activation_out,
+        capture_dtype,
+        args.dataset,
+        args.split,
+    )
 
 
 def _save_predictions(

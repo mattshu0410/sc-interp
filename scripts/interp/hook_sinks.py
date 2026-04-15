@@ -7,6 +7,15 @@ import h5py
 from scripts.interp.hooks import ActivationRecord
 
 
+def default_activation_out(
+    repo_root: Path, runner: str, dataset: str, split: str
+) -> Path:
+    # Canonical on-disk location for captured activations. Shared vocabulary
+    # with downstream probe/SAE/patching scripts so they can find files by
+    # (runner, dataset, split) without duplicating the f-string.
+    return repo_root / "predictions" / f"{runner}_{dataset}_{split}.activations.h5"
+
+
 def _escape_segment(s: str) -> str:
     # Percent-encode characters that carry structural meaning in the h5
     # tag-subpath schema: '/' (group separator), '=' (key/value delimiter

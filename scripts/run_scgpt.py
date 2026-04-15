@@ -49,7 +49,7 @@ from scgpt.utils import compute_perturbation_metrics, set_seed
 
 from scripts import wb
 from scripts.cache import TrainStats, cache_or_train
-from scripts.interp.hook_sinks import H5ActivationSink
+from scripts.interp.hook_sinks import H5ActivationSink, default_activation_out
 from scripts.interp.hooks import HookManager
 from scripts.interp.scgpt_inputs import scatter_back
 from scripts.manifest import Manifest
@@ -552,16 +552,17 @@ def predict_with_capture(
     downstream probe/SAE/reconstruction tolerances.
     """
     model.eval()
-    n_layers = len(model.transformer_encoder.layers)
-    # Per-layer hidden-state captures in forward order; layout BTD because
-    # TransformerEncoderLayer with batch_first=True emits (batch, seq, dim).
+    # Forward order per _encode: encoder → value_encoder → pert_encoder (these
+    # three sum into the residual stream entry point) → transformer_encoder
+    # layers. Layout BTD because TransformerEncoderLayer uses batch_first=True.
     targets = [
-        (
-            f"transformer_encoder.layers.{i}",
-            lambda m, i=i: m.transformer_encoder.layers[i].output,
-            "BTD",
-        )
-        for i in range(n_layers)
+        ("encoder",        lambda m: m.encoder.output,        "BTD"),
+        ("value_encoder",  lambda m: m.value_encoder.output,  "BTD"),
+        ("pert_encoder",   lambda m: m.pert_encoder.output,   "BTD"),
+        *[(f"transformer_encoder.layers.{i}",
+           lambda m, i=i: m.transformer_encoder.layers[i].output,
+           "BTD")
+          for i in range(len(model.transformer_encoder.layers))],
     ]
     nn_model = NNsight(model)
 
@@ -734,10 +735,8 @@ def _predict(
         return predict(
             trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
         )
-    activation_out = args.activation_out or (
-        REPO_ROOT
-        / "predictions"
-        / f"scgpt_{args.dataset}_{args.split}.activations.h5"
+    activation_out = args.activation_out or default_activation_out(
+        REPO_ROOT, "scgpt", args.dataset, args.split
     )
     capture_dtype = {"fp32": torch.float32, "fp16": torch.float16}[args.capture_dtype]
     print(f"==> capturing activations to {activation_out} (dtype={args.capture_dtype})")
