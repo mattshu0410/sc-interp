@@ -41,7 +41,8 @@ uv pip install \
     "umap-learn" \
     "leidenalg" \
     "ipython" \
-    "datasets"
+    "datasets" \
+    "wandb"
 
 # GEARS provides PertData, the Norman/Adamson/Replogle loader used in the tutorial
 # scGPT pins cell-gears<0.0.3, so stick with that. torch-geometric is a gears dep
@@ -51,4 +52,25 @@ uv pip install "cell-gears<0.0.3" "torch-geometric"
 # Install scgpt itself from source, no-deps to skip scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .
 
+# gdown handles the Google Drive folder download for the checkpoint
+uv pip install gdown
+
+# ── Download the whole-human checkpoint ──────────────────────────────────────
+# Skip by setting SCGPT_SKIP_CHECKPOINT=1.
+CHECKPOINT_DIR="$MODEL_DIR/checkpoints/scGPT_human"
+GDRIVE_FOLDER="https://drive.google.com/drive/folders/1oWh_-ZRdhtoGQ2Fw24HP41FgLoomVo-y"
+
+if [ "${SCGPT_SKIP_CHECKPOINT:-}" = "1" ]; then
+    echo "==> SCGPT_SKIP_CHECKPOINT=1, skipping checkpoint download"
+elif [ -f "$CHECKPOINT_DIR/best_model.pt" ] && \
+     [ -f "$CHECKPOINT_DIR/args.json" ] && \
+     [ -f "$CHECKPOINT_DIR/vocab.json" ]; then
+    echo "==> scGPT whole-human checkpoint already present at $CHECKPOINT_DIR"
+else
+    echo "==> Downloading scGPT whole-human checkpoint to $CHECKPOINT_DIR..."
+    mkdir -p "$CHECKPOINT_DIR"
+    gdown --folder "$GDRIVE_FOLDER" -O "$CHECKPOINT_DIR"
+fi
+
 echo "==> scGPT environment ready at $MODEL_DIR/.venv"
+echo "    checkpoint:  $CHECKPOINT_DIR"

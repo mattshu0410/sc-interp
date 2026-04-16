@@ -9,17 +9,32 @@ __pycache__/
 dist/
 build/
 
-# Data (download separately)
-data/*
+# Data (download separately). Keep the directory structure and metadata
+# in git but ignore the actual downloaded files.
+data/**
+!data/
+!data/*/
 !data/.gitkeep
 !data/*.sh
+!data/*/manifest.yaml
 
 # Model artifacts (downloaded via setup scripts)
 _artifacts/
+models/*/checkpoints/
+
+# Inference outputs and cell-eval results
+predictions/
+eval_outputs/
+
+# Papers: keep markdown, ignore the source PDFs (may have copyright)
+docs/papers/*.pdf
 
 # IDE
 .vscode/
 .idea/
+
+# Claude Code local session state
+.claude/
 
 # OS
 .DS_Store

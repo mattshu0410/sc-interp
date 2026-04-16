@@ -61,8 +61,22 @@ fi
 echo "==> uv $(uv --version)"
 
 # ── Init submodules ──────────────────────────────────────────────────────────
-echo "==> Initializing git submodules..."
+echo "==> Initialising git submodules..."
 git submodule update --init --recursive
+
+# ── Setup the shared tools venv (gears, cell-eval, ...) ──────────────────────
+echo ""
+echo "================================================================"
+echo "  Running: tools/setup.sh"
+echo "================================================================"
+bash tools/setup.sh
+
+# ── Setup the docs venv (docling for paper conversion) ───────────────────────
+echo ""
+echo "================================================================"
+echo "  Running: docs/setup.sh"
+echo "================================================================"
+bash docs/setup.sh
 
 # ── Setup each model environment ─────────────────────────────────────────────
 for setup_script in models/setup_*.sh; do
@@ -74,4 +88,17 @@ for setup_script in models/setup_*.sh; do
 done
 
 echo ""
-echo "==> All done. Each model has its own .venv under models/<name>/.venv"
+echo "================================================================"
+echo "  All done."
+echo "================================================================"
+echo "    tools venv:  tools/.venv"
+echo "    docs venv:   docs/.venv"
+echo "    model venvs: models/<name>/.venv"
+echo ""
+echo "  Two manual steps remain before you can run experiments:"
+echo ""
+echo "    1. wandb login     (needs an API key from https://wandb.ai/authorize)"
+echo "    2. gh auth login   (needs a GitHub token, for git push over HTTPS)"
+echo ""
+echo "  Both persist to ~/.netrc / ~/.config/gh/, and only need to"
+echo "  be done once per VM. See the sc-interp README for more detail."

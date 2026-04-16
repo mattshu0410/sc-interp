@@ -1,0 +1,23 @@
+name: norman
+description: Norman 2019 Perturb-seq, K562 cells, single and two-gene CRISPRi knockdowns
+source: gears                          # data loader type, run scripts branch on this
+gears_name: norman                     # name passed to gears.PertData.load(data_name=...)
+shape:
+  cells: 91205
+  genes: 5045
+  perturbations: 284                   # includes ctrl + single KDs + 2-gene combos
+obs:
+  pert_col: condition                  # column in adata.obs holding perturbation label
+  control_label: ctrl                  # value in pert_col for unperturbed cells
+  cell_type_col: null                  # single cell line, no cell-type column
+var:
+  gene_id_type: ensembl                # var_names are Ensembl gene IDs (ENSG...)
+  gene_symbol_column: gene_name        # var column holding gene symbols
+  # gene_id_column omitted -> use var_names (the index) as the canonical ID
+split:
+  source: gears                        # GEARS generates its own train/val/test split
+  default: simulation                  # gears split_type used by scGPT tutorial
+files:
+  adata: perturb_processed.h5ad        # relative to data/norman/
+  cell_graphs: data_pyg/cell_graphs.pkl
+  gene_ontology: go.csv
