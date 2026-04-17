@@ -1,5 +1,6 @@
 """HuggingFace Hub upload/download and model-card helpers for runners."""
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +15,14 @@ def try_download(repo_id: str, cache_dir: Path, filenames: list[str]) -> bool:
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         for name in filenames:
+            # hf_hub_download returns a path inside ~/.cache/huggingface/hub
+            # that is a relative symlink to the blob store. Path.replace moves
+            # the symlink to cache_dir, where its relative target no longer
+            # resolves — a broken link that .exists() returns False for,
+            # which breaks the cache-hit check in cache_or_train. shutil.copy
+            # follows the symlink and writes a real file.
             src = hf_hub_download(repo_id=repo_id, filename=name)
-            Path(src).replace(cache_dir / name)
+            shutil.copy(src, cache_dir / name)
     except RepositoryNotFoundError:
         print(
             f"==> hf:{repo_id} does not exist yet "
