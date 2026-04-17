@@ -27,7 +27,7 @@ Benchmarking single-cell foundation models runs into two kinds of friction.
 **Model side:**
 
 1. Different models expect different input shapes. scGPT takes GEARS's `PertData` wrapper with torch_geometric cell graphs. CellFlow takes an AnnData with gene_1/gene_2 columns, ESM2 embeddings, and a PCA projection. A third model will take something else.
-2. Models need incompatible Python environments. scGPT pins torch 2.3 + torchtext + gears; CellFlow needs JAX + flax + optax. Each model lives in its own venv, and a shared framework has to be importable from all of them.
+2. Models need incompatible Python environments. scGPT needs torch + gears; CellFlow needs JAX + flax + optax. Each model lives in its own venv, and a shared framework has to be importable from all of them.
 3. Repeated boilerplate across runners (CLI flags, cache-or-retrain logic, train-stats persistence, HuggingFace Hub upload) invites drift the moment a second runner exists.
 
 **Data side:**

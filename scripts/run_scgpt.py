@@ -29,9 +29,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-import torchtext
-
-torchtext.disable_torchtext_deprecation_warning()
 warnings.filterwarnings("ignore", message="flash_attn is not installed")
 
 import anndata as ad
