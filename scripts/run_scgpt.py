@@ -567,8 +567,10 @@ def predict_with_capture(
     # encoder exit — so per-layer `.output` proxies resolve to NestedTensors,
     # which have no usable .shape and cannot be written to the h5 sink. The
     # dense path is numerically equivalent at valid token positions (PyTorch's
-    # documented guarantee), so predictions are unchanged.
-    model.transformer_encoder.enable_nested_tensor = False
+    # documented guarantee), so predictions are unchanged. `use_nested_tensor`
+    # is the runtime-read flag (derived from `enable_nested_tensor` at init);
+    # flipping the ctor arg after-the-fact does nothing, so set this one.
+    model.transformer_encoder.use_nested_tensor = False
     nn_model = NNsight(model)
 
     pert_cat: list[str] = []
