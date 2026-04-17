@@ -9,14 +9,15 @@ __pycache__/
 dist/
 build/
 
-# Data (download separately). Keep the directory structure and metadata
-# in git but ignore the actual downloaded files.
+# Data (download separately). Manifests under data/manifests/ are tracked;
+# everything downloaded into data/<name>/ is ignored so loaders (GEARS et al.)
+# can treat data/<name>/ as a pure download cache.
 data/**
 !data/
-!data/*/
 !data/.gitkeep
 !data/*.sh
-!data/*/manifest.yaml
+!data/manifests/
+!data/manifests/*.yaml
 
 # Model artifacts (downloaded via setup scripts)
 _artifacts/

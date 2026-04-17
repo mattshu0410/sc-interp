@@ -92,7 +92,7 @@ Shared infrastructure (common flags, manifest schema, `cache_or_train`, wandb wr
 
 ## Adding a new dataset
 
-1. Create `data/<name>/manifest.yaml` declaring `name`, `source` (the loader type, e.g. `gears` or `tahoe`), `obs` (perturbation and control columns), and optionally `var` (gene ID type and symbol column).
+1. Create `data/manifests/<name>.yaml` declaring `name`, `source` (the loader type, e.g. `gears` or `tahoe`), `obs` (perturbation and control columns), and optionally `var` (gene ID type and symbol column).
 2. If the source is new, add `scripts/data/<source>.py` with a `materialise(manifest, ...)` function that downloads the raw data, computes the split, and calls `scripts.data.splits.write_split` to emit the canonical JSON.
 3. Add a handler for the new source to each runner's `LOADERS` dict that needs to consume it.
 4. Materialise once from the tools venv:
