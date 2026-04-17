@@ -561,6 +561,14 @@ def predict_with_capture(
            "BTD")
           for i in range(len(model.transformer_encoder.layers))],
     ]
+    # Force the dense forward path on the transformer encoder. With
+    # src_key_padding_mask set and no flash_attn available, nn.TransformerEncoder
+    # packs the batch into a NestedTensor between layers and only unpacks at
+    # encoder exit — so per-layer `.output` proxies resolve to NestedTensors,
+    # which have no usable .shape and cannot be written to the h5 sink. The
+    # dense path is numerically equivalent at valid token positions (PyTorch's
+    # documented guarantee), so predictions are unchanged.
+    model.transformer_encoder.enable_nested_tensor = False
     nn_model = NNsight(model)
 
     pert_cat: list[str] = []
