@@ -184,6 +184,52 @@ def test_per_cell_labels_written_and_aligned(tmp_path: Path) -> None:
         assert np.array_equal(bidx[...], expected_bidx)
 
 
+def test_h5_string_label_roundtrip(tmp_path: Path) -> None:
+    # v3: per_cell may carry np.ndarray (dtype=object strings). Sink must
+    # pick h5py.string_dtype for the dataset and append correctly across
+    # batches.
+    path = tmp_path / "act.h5"
+    tags = {"phase": "predict"}
+    b0_act = torch.randn(2, 4)
+    b0_pert = np.array(["ctrl", "ETS2"], dtype=object)
+    b1_act = torch.randn(3, 4)
+    b1_pert = np.array(["CNN1", "ETS2+CNN1", "ctrl"], dtype=object)
+
+    with _sink(path) as sink:
+        sink.write(_rec("lin", b0_act, tags, per_cell={"pert": b0_pert}))
+        sink.write(_rec("lin", b1_act, tags, per_cell={"pert": b1_pert}))
+
+    with h5py.File(path, "r") as f:
+        pert = f["lin/phase=predict/labels/pert"]
+        # h5py reads vlen-utf8 datasets back with object dtype.
+        assert pert.dtype == object
+        assert pert.shape == (5,)
+        got = [s.decode() if isinstance(s, bytes) else s for s in pert[...]]
+        assert got == ["ctrl", "ETS2", "CNN1", "ETS2+CNN1", "ctrl"]
+
+
+def test_h5_extra_meta_accepts_array_values(tmp_path: Path) -> None:
+    # gene_symbols (array) and num_genes (int) must ride through extra_meta
+    # so runners can make the h5 self-describing without touching the sink.
+    path = tmp_path / "act.h5"
+    genes = np.array(["TP53", "ETS2", "CNN1"], dtype=object)
+    with H5ActivationSink(
+        path,
+        runner="scgpt",
+        dataset="norman",
+        split="test",
+        capture_names=["lin"],
+        extra_meta={"gene_symbols": genes, "num_genes": 3},
+    ) as sink:
+        sink.write(_rec("lin", torch.zeros(1, 2), {}))
+
+    with h5py.File(path, "r") as f:
+        m = f["meta"].attrs
+        got = [s.decode() if isinstance(s, bytes) else s for s in m["gene_symbols"]]
+        assert got == ["TP53", "ETS2", "CNN1"]
+        assert int(m["num_genes"]) == 3
+
+
 def test_path_escaping_prevents_collision(tmp_path: Path) -> None:
     path = tmp_path / "act.h5"
     # A tag value containing '/' would, without escaping, create nested groups

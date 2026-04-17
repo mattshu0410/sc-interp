@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import h5py
+import numpy as np
+import torch
 
 from scripts.interp.hooks import ActivationRecord
 
@@ -56,7 +59,10 @@ class MemoryActivationSink:
 
 
 class H5ActivationSink:
-    SCHEMA_VERSION = "2"
+    # v3: per-cell labels may be np.ndarray (incl. object/string), and
+    # extra_meta values may be non-string (arrays, ints) — e.g., gene_symbols
+    # or num_genes. Readers can branch on this to parse string labels.
+    SCHEMA_VERSION = "3"
     REQUIRED_META_FIELDS = ("runner", "dataset", "split", "capture_names")
 
     def __init__(
@@ -68,7 +74,7 @@ class H5ActivationSink:
         split: str,
         capture_names: list[str],
         git_sha: str | None = None,
-        extra_meta: dict[str, str] | None = None,
+        extra_meta: dict[str, Any] | None = None,
         compression_opts: int = 4,
         mode: str = "x",
     ) -> None:
@@ -147,12 +153,22 @@ class H5ActivationSink:
             for k, v in record.metadata_tags.items():
                 dset.attrs[k] = v
 
-        for label_name, label_tensor in record.per_cell.items():
-            label_arr = label_tensor.detach().cpu().numpy()
+        for label_name, label_value in record.per_cell.items():
+            # torch tensors: standard detach→cpu→numpy. np.ndarray: pass
+            # through (typically strings as dtype=object, which torch can't
+            # carry). This is the path that makes pert labels self-describing
+            # in the h5.
+            if isinstance(label_value, torch.Tensor):
+                label_arr = label_value.detach().cpu().numpy()
+            else:
+                label_arr = np.asarray(label_value)
             label_path = f"{gpath}/labels/{label_name}"
             if label_path in self._file:
                 ldset = self._file[label_path]
-                if ldset.dtype != label_arr.dtype:
+                if ldset.dtype != label_arr.dtype and label_arr.dtype != object:
+                    # object-dtype inputs land in a vlen-string dataset whose
+                    # h5py dtype reads back as object but compares != to the
+                    # stored string_dtype, so skip the strict check for them.
                     raise ValueError(
                         f"H5 append dtype mismatch at {label_path}: existing "
                         f"{ldset.dtype} != new {label_arr.dtype}"
@@ -162,13 +178,19 @@ class H5ActivationSink:
                 ldset[old:] = label_arr
             else:
                 lmaxshape = (None,) + label_arr.shape[1:]
+                create_kwargs: dict[str, Any] = {
+                    "maxshape": lmaxshape,
+                    "chunks": True,
+                    "compression": "gzip",
+                    "compression_opts": self.compression_opts,
+                }
+                if label_arr.dtype == object:
+                    # Object-dtype numpy arrays are how we represent string
+                    # labels (torch has no string dtype). h5py needs an
+                    # explicit variable-length utf-8 dtype to serialize them.
+                    create_kwargs["dtype"] = h5py.string_dtype(encoding="utf-8")
                 self._file.create_dataset(
-                    label_path,
-                    data=label_arr,
-                    maxshape=lmaxshape,
-                    chunks=True,
-                    compression="gzip",
-                    compression_opts=self.compression_opts,
+                    label_path, data=label_arr, **create_kwargs
                 )
 
     def close(self) -> None:
