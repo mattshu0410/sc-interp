@@ -20,11 +20,13 @@ python -m scripts.run extract-scgpt \
     --split test \
     --max-cells 1000 \
     --dtype float32 \
+    --n-bins 51 \
     --tag calib-1k-f32 \
     --hf-repo kevinychou/scgpt-activations-norman-calib-1k-f32
 
 python -m scripts.tests.validate_scgpt_activations \
     --dataset norman \
     --split test \
+    --n-bins 51 \
     --tag calib-1k-f32
 deactivate

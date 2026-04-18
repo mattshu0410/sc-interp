@@ -15,19 +15,26 @@ MIN_DRIVER_MAJOR=580
 if command -v nvidia-smi &>/dev/null; then
     DRIVER_MAJOR=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d. -f1)
     if [ -n "$DRIVER_MAJOR" ] && [ "$DRIVER_MAJOR" -lt "$MIN_DRIVER_MAJOR" ]; then
-        echo "==> NVIDIA driver $DRIVER_MAJOR is older than $MIN_DRIVER_MAJOR, upgrading..."
-        sudo apt update -qq
-        sudo apt install -y "nvidia-driver-${MIN_DRIVER_MAJOR}" -o Dpkg::Options::=--force-overwrite
-        sudo apt autoremove -y --purge
-        echo ""
-        echo "================================================================"
-        echo "  Driver $MIN_DRIVER_MAJOR installed. Please run:"
-        echo ""
-        echo "      sudo reboot"
-        echo ""
-        echo "  Then re-run ./setup.sh to finish the rest of the install."
-        echo "================================================================"
-        exit 0
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+            echo "==> WARNING: WSL2 detected. NVIDIA driver $DRIVER_MAJOR < $MIN_DRIVER_MAJOR."
+            echo "    In WSL2 the GPU driver is managed by Windows — upgrade it there."
+            echo "    scGPT (cu121 wheels) works with driver 572+. CellFlow (jax[cuda13])"
+            echo "    may fail. Continuing anyway..."
+        else
+            echo "==> NVIDIA driver $DRIVER_MAJOR is older than $MIN_DRIVER_MAJOR, upgrading..."
+            sudo apt update -qq
+            sudo apt install -y "nvidia-driver-${MIN_DRIVER_MAJOR}" -o Dpkg::Options::=--force-overwrite
+            sudo apt autoremove -y --purge
+            echo ""
+            echo "================================================================"
+            echo "  Driver $MIN_DRIVER_MAJOR installed. Please run:"
+            echo ""
+            echo "      sudo reboot"
+            echo ""
+            echo "  Then re-run ./setup.sh to finish the rest of the install."
+            echo "================================================================"
+            exit 0
+        fi
     fi
 fi
 

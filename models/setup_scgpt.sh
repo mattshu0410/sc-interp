@@ -53,7 +53,9 @@ uv pip install "cell-gears<0.0.3" "torch-geometric"
 uv pip install --no-deps -e .
 
 # nnsight wraps any nn.Module for activation extraction without manual hook management
-uv pip install nnsight
+# Pin torch to prevent nnsight from upgrading past the torchtext-compatible 2.3.0
+uv pip install "nnsight" "torch==2.3.0" "torchvision==0.18.0" \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 
 # gdown handles the Google Drive folder download for the checkpoint
 uv pip install gdown
