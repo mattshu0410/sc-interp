@@ -65,5 +65,13 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
         choices=["h5", "memory"],
         help="activation sink format; memory is for tests/small notebooks only",
     )
+    p.add_argument(
+        "--batches-per-shard",
+        type=int,
+        default=None,
+        help="if set, --activation-out is treated as a folder and the sink "
+        "rotates into shard-NNNNN.h5 files every N batches; default is a "
+        "single .h5 file",
+    )
     wb.add_args(p)
     return p

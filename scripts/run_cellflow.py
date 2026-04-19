@@ -455,11 +455,6 @@ def predict_with_capture(
     """Run real cf.predict, then a second pass at fixed timesteps to capture
     sow'd activations into an H5ActivationSink. Returns the real predictions
     (unchanged from the default path)."""
-    # Patch BEFORE the real predict. cf._solver._predict_fn_cache binds
-    # apply_fn at jit-compile time; patching after a cached call would leave
-    # those closures unpatched.
-    patch_velocity_field()
-
     vf_module = cf._solver.vf
     params = cf._solver.vf_state_inference.params
     cond_embedding_dim = cf._solver.vf.condition_embedding_dim
@@ -470,6 +465,12 @@ def predict_with_capture(
     ]
 
     preds_gene = predict(cf, inputs)
+
+    # Patch only the capture pass. `predict(cf, inputs)` above never asks
+    # for intermediates, so sows are free there; and the second-pass
+    # capture below calls `vf_module.apply(...)` directly, bypassing
+    # `cf._solver._predict_fn_cache` entirely — cache staleness is moot.
+    patch_velocity_field()
 
     sink = H5ActivationSink(
         activation_out,
@@ -484,6 +485,7 @@ def predict_with_capture(
                 [0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32
             ),
         },
+        batches_per_shard=args.batches_per_shard,
     )
 
     with sink, CellflowActivationCapture(

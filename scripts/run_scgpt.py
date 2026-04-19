@@ -541,6 +541,7 @@ def predict_with_capture(
     capture_dtype: torch.dtype,
     dataset: str,
     split: str,
+    batches_per_shard: int | None = None,
 ) -> dict:
     """predict() variant that captures per-layer hidden states via HookManager.
 
@@ -593,6 +594,7 @@ def predict_with_capture(
             "gene_symbols": gene_symbols,
             "include_zero_gene": include_zero_gene,
         },
+        batches_per_shard=batches_per_shard,
     )
     with sink, HookManager(
         nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
@@ -779,6 +781,7 @@ def _predict(
         capture_dtype,
         args.dataset,
         args.split,
+        batches_per_shard=args.batches_per_shard,
     )
 
 

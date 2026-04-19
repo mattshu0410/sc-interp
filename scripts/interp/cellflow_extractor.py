@@ -65,6 +65,11 @@ class CellflowActivationCapture:
         cond: dict[str, Any],
         encoder_noise: Any,
     ) -> None:
+        # Signature matches OT-FM's `ConditionalVelocityField.__call__(t, x,
+        # cond, encoder_noise)`. GENOT's `__call__` takes an extra `x_0`
+        # argument — if/when a GENOT runner calls this, add an overload or
+        # a separate method; the single-arg `x` below would silently drop
+        # `x_0` otherwise. We're OT-FM-only today (run_cellflow.py:229).
         per_cell = self.current_per_cell
         self.current_per_cell = {}
 
@@ -109,3 +114,7 @@ class CellflowActivationCapture:
                         layout="BD",
                     )
                 )
+        # One run() == one batch boundary for the sink's sharding counter.
+        # Fires unconditionally (even if every timestep was gated out) so
+        # batches_per_shard cadence stays aligned with the caller's loop.
+        self.sink.batch_end()

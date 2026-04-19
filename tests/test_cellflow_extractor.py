@@ -301,3 +301,42 @@ def test_records_written_in_timestep_order_per_batch(vf_and_params):
             expected.append((name, f"{t:.2f}"))
     actual = [(r.name, r.metadata_tags["t"]) for r in sink.records]
     assert actual == expected
+
+
+def test_cellflow_extractor_calls_batch_end_once_per_run(vf_and_params):
+    # Sharding cadence depends on one batch_end per run(), regardless of
+    # how many records (timesteps × names) the run emits. Gate-dropped
+    # runs must also fire batch_end so the shard counter stays aligned
+    # with the caller's batch loop.
+    model, params = vf_and_params
+    sink = MemoryActivationSink()
+    cap = CellflowActivationCapture(
+        vf_module=model,
+        params=params,
+        capture_names=["time_enc", "output"],
+        sink=sink,
+        timesteps=(0.0, 0.5, 1.0),
+        gate=lambda tags: tags["t"] != "0.50",  # drop t=0.5 only
+    )
+    for _ in range(3):
+        cap.run(jnp.zeros((2, 6)), {"c": jnp.zeros((1, 5))}, jnp.zeros((1, 8)))
+    assert sink.batch_end_count == 3
+    # 3 runs × (3 timesteps - 1 gated out) × 2 names = 12 records.
+    assert len(sink.records) == 12
+
+
+def test_cellflow_extractor_calls_batch_end_when_all_gated(vf_and_params):
+    model, params = vf_and_params
+    sink = MemoryActivationSink()
+    cap = CellflowActivationCapture(
+        vf_module=model,
+        params=params,
+        capture_names=["output"],
+        sink=sink,
+        timesteps=(0.0, 0.5),
+        gate=lambda _tags: False,
+    )
+    for _ in range(2):
+        cap.run(jnp.zeros((2, 6)), {"c": jnp.zeros((1, 5))}, jnp.zeros((1, 8)))
+    assert sink.batch_end_count == 2
+    assert len(sink.records) == 0

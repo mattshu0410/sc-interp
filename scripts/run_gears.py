@@ -200,6 +200,7 @@ def predict_with_capture(
     dataset: str,
     split: str,
     gene_symbols: np.ndarray,
+    batches_per_shard: int | None = None,
 ) -> dict:
     """predict() variant that captures GEARS submodule outputs via HookManager.
 
@@ -259,6 +260,7 @@ def predict_with_capture(
             "gene_symbols": gene_symbols,
             "num_genes": n_genes,
         },
+        batches_per_shard=batches_per_shard,
     )
     with sink, HookManager(
         nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
@@ -411,6 +413,7 @@ def _predict(
         args.dataset,
         args.split,
         gene_symbols,
+        batches_per_shard=args.batches_per_shard,
     )
 
 
