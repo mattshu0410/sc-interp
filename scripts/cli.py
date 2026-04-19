@@ -42,5 +42,28 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
         default=None,
         help="HF Hub repo id for cached trained artifacts; pulled before training, pushed after",
     )
+    p.add_argument(
+        "--capture-activations",
+        action="store_true",
+        help="enable activation capture during predict (requires a runner wired for HookManager)",
+    )
+    p.add_argument(
+        "--activation-out",
+        type=Path,
+        default=None,
+        help="activation HDF5 path; default predictions/<runner>_<dataset>_<split>.activations.h5",
+    )
+    p.add_argument(
+        "--capture-dtype",
+        default="fp32",
+        choices=["fp32", "fp16"],
+        help="dtype captured activations are cast to before sinking",
+    )
+    p.add_argument(
+        "--capture-format",
+        default="h5",
+        choices=["h5", "memory"],
+        help="activation sink format; memory is for tests/small notebooks only",
+    )
     wb.add_args(p)
     return p
