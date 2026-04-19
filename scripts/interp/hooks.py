@@ -124,12 +124,8 @@ class HookManager:
         per_cell = self.current_per_cell
         self.current_per_cell = {}
         # `gate` filters sink writes only; the model output is always returned
-        # so predict-loop callers get the forward result regardless. A gated
-        # run still counts as one batch boundary for sharding — otherwise the
-        # shard-size-in-batches contract would drift every time the gate
-        # dropped a slice.
+        # so predict-loop callers get the forward result regardless.
         if self.gate is not None and not self.gate(tags):
-            self.sink.batch_end()
             return output_saved
         for name, s, layout in saved:
             if not isinstance(s, torch.Tensor):
@@ -152,7 +148,4 @@ class HookManager:
                     layout=layout,
                 )
             )
-        # One run() == one batch for the sink's sharding counter. No-op when
-        # sharding is disabled; unconditional call keeps the caller branch-free.
-        self.sink.batch_end()
         return output_saved

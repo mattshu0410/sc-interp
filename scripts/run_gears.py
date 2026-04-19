@@ -28,7 +28,6 @@ import numpy as np
 import pandas as pd
 import torch
 from nnsight import NNsight
-from tqdm import tqdm
 
 from gears import GEARS, PertData
 
@@ -177,7 +176,7 @@ def predict(model: GEARS, loader: Iterable, device: torch.device) -> dict:
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in tqdm(loader, total=len(loader), desc="gears predict"):
+    for batch in loader:
         batch.to(device)
         pert_cat.extend(batch.pert)
         p = model.best_model(batch)
@@ -201,7 +200,6 @@ def predict_with_capture(
     dataset: str,
     split: str,
     gene_symbols: np.ndarray,
-    batches_per_shard: int | None = None,
 ) -> dict:
     """predict() variant that captures GEARS submodule outputs via HookManager.
 
@@ -261,14 +259,13 @@ def predict_with_capture(
             "gene_symbols": gene_symbols,
             "num_genes": n_genes,
         },
-        batches_per_shard=batches_per_shard,
     )
     with sink, HookManager(
         nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in tqdm(loader, total=len(loader), desc="gears capture"):
+        for batch in loader:
             batch.to(device)
             pert_cat.extend(batch.pert)
             bs = batch.num_graphs
@@ -414,7 +411,6 @@ def _predict(
         args.dataset,
         args.split,
         gene_symbols,
-        batches_per_shard=args.batches_per_shard,
     )
 
 

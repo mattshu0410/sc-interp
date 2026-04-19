@@ -23,11 +23,4 @@ uv pip install wandb omegaconf
 # Replace CPU JAX with CUDA 13 build for GPU support
 uv pip install --upgrade "jax[cuda13]"
 
-# Activation capture deps. h5py is the on-disk sink; torch is needed to
-# package captured JAX arrays as ActivationRecord.tensor. Pin the CPU
-# wheel: jax[cuda13] already ships CUDA libs, and a default torch install
-# pulls a different cuDNN/cuBLAS pair that crashes at import.
-uv pip install "h5py>=3.9" torch --index-strategy unsafe-best-match \
-    --extra-index-url https://download.pytorch.org/whl/cpu
-
 echo "==> CellFlow environment ready at $MODEL_DIR/.venv"

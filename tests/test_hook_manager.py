@@ -60,9 +60,6 @@ class _FailOnNthSink:
         if len(self.records) == self._fail_on:
             raise RuntimeError("sink boom")
 
-    def batch_end(self) -> None:
-        pass
-
     def close(self) -> None:
         self.closed = True
 
@@ -280,9 +277,6 @@ def test_exit_preserves_original_exception_when_close_fails(
         def write(self, record: ActivationRecord) -> None:
             self.records.append(record)
 
-        def batch_end(self) -> None:
-            pass
-
         def close(self) -> None:
             raise RuntimeError("close boom")
 
@@ -307,9 +301,6 @@ def test_exit_surfaces_close_error_when_no_prior_exception(
 
     class _BadCloseSink:
         def write(self, record: ActivationRecord) -> None:
-            pass
-
-        def batch_end(self) -> None:
             pass
 
         def close(self) -> None:
@@ -658,41 +649,3 @@ def test_capture_parent_gets_aggregate() -> None:
     with torch.no_grad():
         expected = net(x, y)
     assert torch.equal(sink.records[0].tensor, expected)
-
-
-def test_hook_manager_calls_batch_end_once_per_run(
-    simple_lin: tuple[NNsight, torch.Tensor],
-) -> None:
-    # Sharding cadence depends on a one-call-per-run contract regardless of
-    # how many per-target writes fired inside the run.
-    nn_model, x = simple_lin
-    sink = MemoryActivationSink()
-    with HookManager(
-        nn_model,
-        capture=[("lin", lambda m: m.output), ("lin2", lambda m: m.output)],
-        sink=sink,
-    ) as hm:
-        for _ in range(3):
-            hm.run(x)
-    assert sink.batch_end_count == 3
-    # Sanity: 3 runs × 2 targets = 6 writes, independent of batch_end count.
-    assert len(sink.records) == 6
-
-
-def test_hook_manager_calls_batch_end_when_gate_drops(
-    simple_lin: tuple[NNsight, torch.Tensor],
-) -> None:
-    # Gate-dropped batches are still batch boundaries — skipping batch_end
-    # on them would make shard rotation drift relative to the caller loop.
-    nn_model, x = simple_lin
-    sink = MemoryActivationSink()
-    with HookManager(
-        nn_model,
-        capture=[("lin", lambda m: m.output)],
-        sink=sink,
-        gate=lambda _tags: False,
-    ) as hm:
-        for _ in range(4):
-            hm.run(x)
-    assert sink.batch_end_count == 4
-    assert len(sink.records) == 0

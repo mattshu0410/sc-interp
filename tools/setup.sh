@@ -17,12 +17,9 @@ source .venv/bin/activate
 uv pip install --index-url https://download.pytorch.org/whl/cpu "torch"
 
 # GEARS (PertData loader for Norman, Adamson, Replogle, Dixit datasets)
-# plus its transitive needs that aren't auto-installed. Pinned to 0.1.2
-# (latest PyPI, Dec 2023) — earlier PyPI releases (<=0.0.2) ship a
-# create_cell_graph that omits `pert_idx` on each Data, making the pkl
-# unusable by GEARS_Model.forward which reads `data.pert_idx`.
+# plus its transitive needs that aren't auto-installed
 uv pip install \
-    "cell-gears==0.1.2" \
+    "cell-gears<0.0.3" \
     "torch-geometric" \
     "anndata" \
     "scanpy"
