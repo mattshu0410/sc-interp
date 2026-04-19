@@ -84,6 +84,33 @@ def test_reader_missing_capture_raises(tmp_path: Path) -> None:
             r.read("blocks.17.attn", {})
 
 
+def test_reader_layout_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "act.h5"
+    with H5ActivationSink(
+        path, runner="r", dataset="d", split="s", capture_names=["a", "b"]
+    ) as sink:
+        sink.write(
+            ActivationRecord(
+                name="a",
+                tensor=torch.zeros(2, 3, 4),
+                metadata_tags={},
+                layout="BTD",
+            )
+        )
+        sink.write(
+            ActivationRecord(
+                name="b",
+                tensor=torch.zeros(2, 4),
+                metadata_tags={},
+                # layout defaults to ""
+            )
+        )
+
+    with H5ActivationReader(path) as r:
+        assert r.layout("a") == "BTD"
+        assert r.layout("b") == ""
+
+
 def test_reader_rejects_mismatched_schema(tmp_path: Path) -> None:
     import h5py
 

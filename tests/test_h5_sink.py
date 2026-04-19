@@ -237,6 +237,33 @@ def test_append_dtype_mismatch_raises_and_preserves_dataset(tmp_path: Path) -> N
         assert dset.dtype == np.float32
 
 
+def test_layout_attr_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "act.h5"
+    with _sink(path) as sink:
+        sink.write(
+            ActivationRecord(
+                name="lin",
+                tensor=torch.zeros(2, 4),
+                metadata_tags={},
+                layout="BTD",
+            )
+        )
+
+    with h5py.File(path, "r") as f:
+        assert f["lin/activation"].attrs["layout"] == "BTD"
+
+
+def test_layout_unspecified_writes_no_attr(tmp_path: Path) -> None:
+    # Empty-string layout means "not annotated" — don't pollute dataset attrs
+    # with a layout key so consumers can distinguish absent from present.
+    path = tmp_path / "act.h5"
+    with _sink(path) as sink:
+        sink.write(_rec("lin", torch.zeros(2, 4), {}))
+
+    with h5py.File(path, "r") as f:
+        assert "layout" not in f["lin/activation"].attrs
+
+
 def test_per_cell_length_mismatch_raises() -> None:
     with pytest.raises(ValueError, match="per_cell"):
         ActivationRecord(

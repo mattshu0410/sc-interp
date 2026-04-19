@@ -434,6 +434,183 @@ def test_asymmetric_shapes_preserved() -> None:
     assert torch.equal(by_name["head"], head)
 
 
+# -- Phase A.1: run returns model output --------------------------------
+
+
+def test_run_returns_tensor_output(simple_lin: tuple[NNsight, torch.Tensor]) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
+        out = hm.run(x)
+
+    expected = x @ nn_model._model.weight.T + nn_model._model.bias
+    assert isinstance(out, torch.Tensor)
+    assert torch.equal(out, expected)
+
+
+def test_run_returns_dict_output() -> None:
+    class _DictNet(nn.Module):
+        def __init__(self, d: int) -> None:
+            super().__init__()
+            self.lin = nn.Linear(d, d)
+
+        def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+            y = self.lin(x)
+            return {"mlm_output": y, "other": y * 2}
+
+    torch.manual_seed(0)
+    net = _DictNet(4)
+    nn_model = NNsight(net)
+    x = torch.randn(2, 4)
+    sink = MemoryActivationSink()
+
+    with HookManager(nn_model, capture=[("lin", lambda m: m.lin.output)], sink=sink) as hm:
+        out = hm.run(x)
+
+    # scGPT-style dict round-trip: post-trace-exit, `out` is a real dict with
+    # real tensors, not a proxy. This is the contract run_scgpt relies on for
+    # extracting "mlm_output" while the sink captures inner activations.
+    assert isinstance(out, dict)
+    assert set(out) == {"mlm_output", "other"}
+    with torch.no_grad():
+        expected = net.lin(x)
+    assert torch.equal(out["mlm_output"], expected)
+    assert torch.equal(out["other"], expected * 2)
+
+
+def test_run_empty_capture_still_returns_output(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(nn_model, capture=[], sink=sink) as hm:
+        out = hm.run(x)
+
+    expected = x @ nn_model._model.weight.T + nn_model._model.bias
+    assert torch.equal(out, expected)
+    assert sink.records == []
+
+
+def test_out_of_order_save_raises() -> None:
+    # User captures must be listed in forward-execution order. Reversing them
+    # (head before embed) triggers nnsight's OutOfOrderError inside the trace.
+    # Pin the category by matching the documented substring.
+    torch.manual_seed(0)
+    net = _TinyNet()
+    net.eval()
+    nn_model = NNsight(net)
+    sink = MemoryActivationSink()
+
+    with HookManager(
+        nn_model,
+        capture=[
+            ("head", lambda m: m.head.output),
+            ("embed", lambda m: m.embed.output),
+        ],
+        sink=sink,
+    ) as hm:
+        with pytest.raises(Exception, match="(?i)out of order"):
+            hm.run(torch.tensor([[0, 1, 2, 3]]))
+
+
+# -- Phase A.2: set_per_cell + auto-clear -------------------------------
+
+
+def test_set_per_cell_populates_and_clears(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
+        hm.set_per_cell({"cell_id": torch.arange(x.shape[0])})
+        hm.run(x)
+        # No set_per_cell on this run — auto-clear means record.per_cell empty.
+        hm.run(x)
+
+    assert len(sink.records) == 2
+    assert set(sink.records[0].per_cell) == {"cell_id"}
+    assert torch.equal(sink.records[0].per_cell["cell_id"], torch.arange(x.shape[0]))
+    assert sink.records[1].per_cell == {}
+
+
+def test_set_per_cell_snapshot_isolated_from_caller_mutation(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
+        ids = torch.arange(x.shape[0])
+        hm.set_per_cell({"cell_id": ids})
+        hm.run(x)
+
+    # Mutating the dict the caller passed in must not corrupt the written
+    # record. set_per_cell takes a defensive shallow copy of the dict itself.
+    assert set(sink.records[0].per_cell) == {"cell_id"}
+
+
+# -- Phase A.3: no_grad ctor param --------------------------------------
+
+
+def test_layout_propagates_from_capture_spec(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    # 3-tuple CaptureSpec form: layout travels with the target that owns it.
+    with HookManager(
+        nn_model,
+        capture=[("lin", lambda m: m.output, "BD")],
+        sink=sink,
+    ) as hm:
+        hm.run(x)
+
+    assert sink.records[0].layout == "BD"
+
+
+def test_gate_false_still_returns_output(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    # Pins the documented contract: gate filters sink writes, but the forward
+    # result is always returned so predict loops stay uninterrupted.
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(
+        nn_model,
+        capture=[("lin", lambda m: m.output)],
+        sink=sink,
+        gate=lambda _tags: False,
+    ) as hm:
+        out = hm.run(x)
+
+    expected = x @ nn_model._model.weight.T + nn_model._model.bias
+    assert sink.records == []
+    assert torch.equal(out, expected)
+
+
+def test_no_grad_false_preserves_autograd(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    with HookManager(
+        nn_model, capture=[("lin", lambda m: m.output)], sink=sink, no_grad=False
+    ) as hm:
+        out = hm.run(x)
+
+    # Weights require grad → forward produces a grad-carrying tensor when no_grad=False.
+    # Returned output retains requires_grad. Captured record is detached by design
+    # (sink-stored tensors must be standalone for disk round-trip), so we only
+    # assert on the returned output.
+    assert out.requires_grad is True
+
+
 def test_capture_parent_gets_aggregate() -> None:
     torch.manual_seed(0)
     net = _CallsTwice(4)

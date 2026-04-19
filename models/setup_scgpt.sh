@@ -52,6 +52,23 @@ uv pip install "cell-gears<0.0.3" "torch-geometric"
 # Install scgpt itself from source, no-deps to skip scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .
 
+# Activation capture (scripts/interp/) — nnsight wraps the model for tracing,
+# h5py is the on-disk sink. nnsight 0.5 declares torch>=2.4 but HookManager's
+# trace path only uses forward hooks + autograd (stable since torch 2.0), and
+# torch must stay at 2.3.0 because torchtext 0.18.0 is ABI-pinned to it. So
+# --no-deps preserves the pin; runtime deps go in explicitly below (they all
+# accept torch 2.3.0 or don't depend on torch).
+uv pip install --no-deps "nnsight>=0.5,<0.6"
+uv pip install \
+    "transformers" \
+    "astor" \
+    "cloudpickle" \
+    "python-socketio[client]" \
+    "pydantic>=2.9.0" \
+    "accelerate" \
+    "toml" \
+    "h5py"
+
 # gdown handles the Google Drive folder download for the checkpoint
 uv pip install gdown
 

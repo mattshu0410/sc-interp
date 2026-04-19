@@ -24,6 +24,11 @@ uv pip install torch-geometric
 # from Dec 2023 and lags the GitHub main branch, so we install editable.
 uv pip install -e .
 
+# Activation capture (scripts/interp/) — nnsight wraps the model for tracing,
+# h5py is the on-disk sink. nnsight 0.5.x source-AST tracer is what HookManager
+# is written against; any upgrade wants a tracer-behavior re-check.
+uv pip install "nnsight>=0.5,<0.6" "h5py"
+
 # Smoke test
 python -c "import gears; from gears import PertData, GEARS; print('gears import OK')"
 
