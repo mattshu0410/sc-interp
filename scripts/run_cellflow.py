@@ -35,6 +35,7 @@ from cellflow.data._dataloader import PredictionSampler
 from cellflow.model import CellFlow
 from cellflow.preprocessing import get_esm_embedding
 from ott.solvers import utils as solver_utils
+from tqdm import tqdm
 
 from scripts import wb
 from scripts.cache import TrainStats, cache_or_train
@@ -397,7 +398,9 @@ def predict(cf: CellFlow, inputs: CellFlowInputs) -> dict:
     # wants an AnnData with the PCA'd predictions in obsm, and writes the
     # reconstructed gene-space values to adata.layers[layers_key_added].
     preds_gene: dict[str, np.ndarray] = {}
-    for cond, arr in preds_pca.items():
+    for cond, arr in tqdm(
+        preds_pca.items(), total=len(preds_pca), desc="cellflow pca→gene"
+    ):
         arr = np.asarray(np.squeeze(arr))
         tmp_adata = ad.AnnData(
             X=np.empty((arr.shape[0], inputs.adata_train.n_vars), dtype=np.float32),
@@ -498,7 +501,12 @@ def predict_with_capture(
         cap.set_tag("phase", "predict")
         enc_noise = jnp.zeros((1, cond_embedding_dim), dtype=jnp.float32)
         cell_offset = 0
-        for cond_str, source_x, cond_emb in _iter_predict_inputs(cf, inputs):
+        # PredictionSampler.sample() already materializes all conditions in
+        # memory, so list() costs nothing and gives tqdm a real total.
+        conditions = list(_iter_predict_inputs(cf, inputs))
+        for cond_str, source_x, cond_emb in tqdm(
+            conditions, total=len(conditions), desc="cellflow capture"
+        ):
             bs = source_x.shape[0]
             cap.set_per_cell({
                 "cell_id": torch.arange(cell_offset, cell_offset + bs),

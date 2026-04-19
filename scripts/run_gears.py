@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import torch
 from nnsight import NNsight
+from tqdm import tqdm
 
 from gears import GEARS, PertData
 
@@ -176,7 +177,7 @@ def predict(model: GEARS, loader: Iterable, device: torch.device) -> dict:
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in loader:
+    for batch in tqdm(loader, total=len(loader), desc="gears predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
         p = model.best_model(batch)
@@ -267,7 +268,7 @@ def predict_with_capture(
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in loader:
+        for batch in tqdm(loader, total=len(loader), desc="gears capture"):
             batch.to(device)
             pert_cat.extend(batch.pert)
             bs = batch.num_graphs
