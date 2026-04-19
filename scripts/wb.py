@@ -4,6 +4,8 @@ Exposes add_args/init/log/finish/url. No-ops silently when wandb is not
 installed or --wandb-mode=disabled.
 """
 
+from __future__ import annotations
+
 import argparse
 from typing import Any
 
