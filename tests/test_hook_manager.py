@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -550,6 +551,29 @@ def test_set_per_cell_snapshot_isolated_from_caller_mutation(
     # Mutating the dict the caller passed in must not corrupt the written
     # record. set_per_cell takes a defensive shallow copy of the dict itself.
     assert set(sink.records[0].per_cell) == {"cell_id"}
+
+
+def test_set_per_cell_accepts_mixed_tensor_and_ndarray(
+    simple_lin: tuple[NNsight, torch.Tensor],
+) -> None:
+    # A per_cell dict may mix torch tensors (numeric cell_id) and numpy
+    # arrays (string pert labels) — this is how runners make h5 files
+    # self-describing without needing a torch string dtype.
+    nn_model, x = simple_lin
+    sink = MemoryActivationSink()
+
+    pert = np.array(["ctrl"] * x.shape[0], dtype=object)
+    with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
+        hm.set_per_cell({
+            "cell_id": torch.arange(x.shape[0]),
+            "pert": pert,
+        })
+        hm.run(x)
+
+    pc = sink.records[0].per_cell
+    assert set(pc) == {"cell_id", "pert"}
+    assert torch.equal(pc["cell_id"], torch.arange(x.shape[0]))
+    assert list(pc["pert"]) == ["ctrl"] * x.shape[0]
 
 
 # -- Phase A.3: no_grad ctor param --------------------------------------

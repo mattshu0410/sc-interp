@@ -29,9 +29,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-import torchtext
-
-torchtext.disable_torchtext_deprecation_warning()
 warnings.filterwarnings("ignore", message="flash_attn is not installed")
 
 import anndata as ad
@@ -536,6 +533,7 @@ def predict_with_capture(
     model: TransformerGenerator,
     loader: Iterable,
     gene_ids: np.ndarray,
+    gene_symbols: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
     max_seq_len: int,
@@ -564,6 +562,16 @@ def predict_with_capture(
            "BTD")
           for i in range(len(model.transformer_encoder.layers))],
     ]
+    # Force the dense forward path on the transformer encoder. With
+    # src_key_padding_mask set and no flash_attn available, nn.TransformerEncoder
+    # packs the batch into a NestedTensor between layers and only unpacks at
+    # encoder exit — so per-layer `.output` proxies resolve to NestedTensors,
+    # which have no usable .shape and cannot be written to the h5 sink. The
+    # dense path is numerically equivalent at valid token positions (PyTorch's
+    # documented guarantee), so predictions are unchanged. `use_nested_tensor`
+    # is the runtime-read flag (derived from `enable_nested_tensor` at init);
+    # flipping the ctor arg after-the-fact does nothing, so set this one.
+    model.transformer_encoder.use_nested_tensor = False
     nn_model = NNsight(model)
 
     pert_cat: list[str] = []
@@ -576,6 +584,15 @@ def predict_with_capture(
         dataset=dataset,
         split=split,
         capture_names=[name for name, *_ in targets],
+        # Run-level constants that make the h5 self-describing. gene_symbols
+        # is ordered by dataset column; resolve a token's gene via
+        # gene_symbols[gene_dataset_ids[cell, token]]. include_zero_gene
+        # documents whether gene_dataset_ids is a sampled window or the full
+        # gene set.
+        extra_meta={
+            "gene_symbols": gene_symbols,
+            "include_zero_gene": include_zero_gene,
+        },
     )
     with sink, HookManager(
         nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
@@ -588,8 +605,14 @@ def predict_with_capture(
                 batch, gene_ids, include_zero_gene, device, max_seq_len
             )
             bs = fa.input_values.shape[0]
+            # Gene dataset indices are sampled/permuted per batch (see
+            # build_forward_args), so they're stored per-cell even though all
+            # cells in one batch share the same window. .expand is a view;
+            # the sink materializes to numpy, so no mem blowup before then.
             hm.set_per_cell({
                 "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "pert": np.array(batch.pert, dtype=object),
+                "gene_dataset_ids": fa.input_gene_ids.unsqueeze(0).expand(bs, -1).contiguous().cpu(),
             })
             output_dict = hm.run(
                 fa.mapped_input_gene_ids,
@@ -740,10 +763,15 @@ def _predict(
     )
     capture_dtype = {"fp32": torch.float32, "fp16": torch.float16}[args.capture_dtype]
     print(f"==> capturing activations to {activation_out} (dtype={args.capture_dtype})")
+    # gene_symbols[i] names dataset column i; stored once in /meta so
+    # downstream can resolve the per-cell gene_dataset_ids labels back to
+    # gene names without joining against the prediction h5ad.
+    gene_symbols = inputs.var["gene_name"].to_numpy().astype(object)
     return predict_with_capture(
         trained.model,
         loader,
         trained.gene_ids,
+        gene_symbols,
         args.include_zero_gene,
         trained.device,
         args.max_seq_len,

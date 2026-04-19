@@ -184,6 +184,78 @@ def test_per_cell_labels_written_and_aligned(tmp_path: Path) -> None:
         assert np.array_equal(bidx[...], expected_bidx)
 
 
+def test_h5_string_label_roundtrip(tmp_path: Path) -> None:
+    # v3: per_cell may carry np.ndarray (dtype=object strings). Sink must
+    # pick h5py.string_dtype for the dataset and append correctly across
+    # batches.
+    path = tmp_path / "act.h5"
+    tags = {"phase": "predict"}
+    b0_act = torch.randn(2, 4)
+    b0_pert = np.array(["ctrl", "ETS2"], dtype=object)
+    b1_act = torch.randn(3, 4)
+    b1_pert = np.array(["CNN1", "ETS2+CNN1", "ctrl"], dtype=object)
+
+    with _sink(path) as sink:
+        sink.write(_rec("lin", b0_act, tags, per_cell={"pert": b0_pert}))
+        sink.write(_rec("lin", b1_act, tags, per_cell={"pert": b1_pert}))
+
+    with h5py.File(path, "r") as f:
+        pert = f["lin/phase=predict/labels/pert"]
+        # h5py reads vlen-utf8 datasets back with object dtype.
+        assert pert.dtype == object
+        assert pert.shape == (5,)
+        got = [s.decode() if isinstance(s, bytes) else s for s in pert[...]]
+        assert got == ["ctrl", "ETS2", "CNN1", "ETS2+CNN1", "ctrl"]
+
+
+def test_h5_extra_meta_accepts_array_values(tmp_path: Path) -> None:
+    # gene_symbols (array) and num_genes (int) must ride through extra_meta
+    # so runners can make the h5 self-describing without touching the sink.
+    path = tmp_path / "act.h5"
+    genes = np.array(["TP53", "ETS2", "CNN1"], dtype=object)
+    with H5ActivationSink(
+        path,
+        runner="scgpt",
+        dataset="norman",
+        split="test",
+        capture_names=["lin"],
+        extra_meta={"gene_symbols": genes, "num_genes": 3},
+    ) as sink:
+        sink.write(_rec("lin", torch.zeros(1, 2), {}))
+
+    with h5py.File(path, "r") as f:
+        # Arrays land under /meta/<k> as datasets (attr 64KB cap won't fit
+        # real-world gene lists). Scalars stay as attrs.
+        gs = f["meta/gene_symbols"][:]
+        got = [s.decode() if isinstance(s, bytes) else s for s in gs]
+        assert got == ["TP53", "ETS2", "CNN1"]
+        assert int(f["meta"].attrs["num_genes"]) == 3
+
+
+def test_h5_extra_meta_handles_large_string_array(tmp_path: Path) -> None:
+    # Norman's gene_symbols (~5k strings) overflows the 64KB attr header;
+    # the dataset path must accommodate that. 8000 strings is comfortably past.
+    path = tmp_path / "act.h5"
+    genes = np.array([f"GENE{i:05d}" for i in range(8000)], dtype=object)
+    with H5ActivationSink(
+        path,
+        runner="gears",
+        dataset="norman",
+        split="test",
+        capture_names=["gene_emb"],
+        extra_meta={"gene_symbols": genes},
+    ) as sink:
+        sink.write(_rec("gene_emb", torch.zeros(1, 4), {}))
+
+    with h5py.File(path, "r") as f:
+        gs = f["meta/gene_symbols"][:]
+        assert gs.shape == (8000,)
+        first = gs[0].decode() if isinstance(gs[0], bytes) else gs[0]
+        last = gs[-1].decode() if isinstance(gs[-1], bytes) else gs[-1]
+        assert first == "GENE00000"
+        assert last == "GENE07999"
+
+
 def test_path_escaping_prevents_collision(tmp_path: Path) -> None:
     path = tmp_path / "act.h5"
     # A tag value containing '/' would, without escaping, create nested groups

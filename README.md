@@ -27,7 +27,7 @@ Benchmarking single-cell foundation models runs into two kinds of friction.
 **Model side:**
 
 1. Different models expect different input shapes. scGPT takes GEARS's `PertData` wrapper with torch_geometric cell graphs. CellFlow takes an AnnData with gene_1/gene_2 columns, ESM2 embeddings, and a PCA projection. A third model will take something else.
-2. Models need incompatible Python environments. scGPT pins torch 2.3 + torchtext + gears; CellFlow needs JAX + flax + optax. Each model lives in its own venv, and a shared framework has to be importable from all of them.
+2. Models need incompatible Python environments. scGPT needs torch + gears; CellFlow needs JAX + flax + optax. Each model lives in its own venv, and a shared framework has to be importable from all of them.
 3. Repeated boilerplate across runners (CLI flags, cache-or-retrain logic, train-stats persistence, HuggingFace Hub upload) invites drift the moment a second runner exists.
 
 **Data side:**
@@ -92,7 +92,7 @@ Shared infrastructure (common flags, manifest schema, `cache_or_train`, wandb wr
 
 ## Adding a new dataset
 
-1. Create `data/<name>/manifest.yaml` declaring `name`, `source` (the loader type, e.g. `gears` or `tahoe`), `obs` (perturbation and control columns), and optionally `var` (gene ID type and symbol column).
+1. Create `data/manifests/<name>.yaml` declaring `name`, `source` (the loader type, e.g. `gears` or `tahoe`), `obs` (perturbation and control columns), and optionally `var` (gene ID type and symbol column).
 2. If the source is new, add `scripts/data/<source>.py` with a `materialise(manifest, ...)` function that downloads the raw data, computes the split, and calls `scripts.data.splits.write_split` to emit the canonical JSON.
 3. Add a handler for the new source to each runner's `LOADERS` dict that needs to consume it.
 4. Materialise once from the tools venv:

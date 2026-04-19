@@ -44,12 +44,6 @@ if ! command -v claude &>/dev/null; then
     curl -fsSL https://claude.ai/install.sh | bash
 fi
 
-# ── Install peonping if not present ──────────────────────────────────────────
-if ! command -v peonping &>/dev/null; then
-    echo "==> Installing peonping..."
-    curl -fsSL https://peonping.com/install | bash
-fi
-
 # ── Install uv if not present ────────────────────────────────────────────────
 if ! command -v uv &>/dev/null; then
     echo "==> Installing uv..."

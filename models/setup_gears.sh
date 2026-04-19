@@ -18,7 +18,11 @@ uv pip install torch torchvision
 
 # PyTorch Geometric. GEARS only uses torch_geometric.data and SGConv,
 # so no C-extensions (torch-scatter / torch-sparse / torch-cluster) are needed.
-uv pip install torch-geometric
+# Pinned <2.4 because PyG 2.4 tightened Batch.from_data_list to drop Python-list
+# attributes it can't collate; GEARS stores pert_idx/de_idx as plain lists on
+# Data objects and model.forward reads data.pert_idx off the batch. Upstream
+# GEARS is dormant, so the pin stays on our side.
+uv pip install "torch-geometric<2.4"
 
 # Install GEARS from the submodule source. The PyPI release (0.1.2) is
 # from Dec 2023 and lags the GitHub main branch, so we install editable.
@@ -31,5 +35,10 @@ uv pip install "nnsight>=0.5,<0.6" "h5py"
 
 # Smoke test
 python -c "import gears; from gears import PertData, GEARS; print('gears import OK')"
+# If running on the kevinjaro workstation (i9-13900K with Vmin-Shift P-core
+# degradation), the line above miscompiles ~95% of the time on cold numba
+# cache. Comment it out and use the taskset variant below to pin the first
+# import to the E-cores; once the .nbc cache is warm everything else is fine.
+# taskset -c 16-31 python -c "import gears; from gears import PertData, GEARS; print('gears import OK')"
 
 echo "==> GEARS environment ready at $MODEL_DIR/.venv"

@@ -14,8 +14,14 @@ def try_download(repo_id: str, cache_dir: Path, filenames: list[str]) -> bool:
     cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         for name in filenames:
-            src = hf_hub_download(repo_id=repo_id, filename=name)
-            Path(src).replace(cache_dir / name)
+            # local_dir makes hf_hub_download materialise a real file at
+            # cache_dir/name (huggingface_hub >=0.23). Earlier manual moves
+            # of the default hub-cache symlink produced relative links that
+            # broke when the target resolved from the new parent — skipping
+            # the copy dance avoids that whole failure mode.
+            hf_hub_download(
+                repo_id=repo_id, filename=name, local_dir=str(cache_dir)
+            )
     except RepositoryNotFoundError:
         print(
             f"==> hf:{repo_id} does not exist yet "

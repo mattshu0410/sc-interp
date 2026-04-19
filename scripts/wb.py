@@ -66,13 +66,20 @@ def init(
     if extra_config:
         config.update(extra_config)
 
-    _run = wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name or f"{model}-{dataset}",
-        config=config,
-        tags=tags,
-        mode=args.wandb_mode,
-    )
+    try:
+        _run = wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_name or f"{model}-{dataset}",
+            config=config,
+            tags=tags,
+            mode=args.wandb_mode,
+        )
+    except Exception as e:
+        # Auth / network failures should not kill the run. Matches the
+        # "wandb not installed" branch above: log once, keep going.
+        print(f"==> wandb.init failed ({type(e).__name__}: {e}); logging disabled")
+        _run = None
+        return
     print(f"==> wandb run: {_run.url}")
 
 

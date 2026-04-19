@@ -1,9 +1,11 @@
 """Dataset manifest schema and loader.
 
-Each dataset under data/<name>/manifest.yaml is a loader-agnostic
+Each manifest at data/manifests/<name>.yaml is a loader-agnostic
 descriptor: a dispatch key (`source`), the obs columns runners need to
 identify perturbations and controls, and an arbitrary `raw` bag for
-loader-specific fields. Loaders read their own keys from `raw`.
+loader-specific fields. Loaders read their own keys from `raw`. Manifests
+live outside data/<name>/ so dataset loaders (e.g. GEARS) can treat
+data/<name>/ as a pure download cache.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ class VarSchema:
 
 @dataclass
 class Manifest:
-    """Typed view of data/<name>/manifest.yaml."""
+    """Typed view of data/manifests/<name>.yaml."""
     name: str
     source: str
     obs: ObsSchema
@@ -54,8 +56,8 @@ class Manifest:
 
     @classmethod
     def load(cls, name: str, repo_root: Path = REPO_ROOT) -> Manifest:
-        """Read data/<name>/manifest.yaml and return a validated Manifest."""
-        path = repo_root / "data" / name / "manifest.yaml"
+        """Read data/manifests/<name>.yaml and return a validated Manifest."""
+        path = repo_root / "data" / "manifests" / f"{name}.yaml"
         if not path.exists():
             raise FileNotFoundError(f"no manifest at {path}")
         with open(path) as f:

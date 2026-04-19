@@ -4,6 +4,7 @@ import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Union
 
+import numpy as np
 import torch
 
 
@@ -22,8 +23,10 @@ class ActivationRecord:
     # Per-cell sidecars aligned on axis 0 of `tensor`. Typical uses: cell_id,
     # gene_id, perturbation label, split index. Downstream probing / SAE code
     # reads these alongside the activation to recover which row came from
-    # where without having to re-join by order.
-    per_cell: dict[str, torch.Tensor] = field(default_factory=dict)
+    # where without having to re-join by order. np.ndarray is allowed so
+    # string labels (dtype=object) can ride on the same channel — torch has
+    # no string dtype.
+    per_cell: dict[str, torch.Tensor | np.ndarray] = field(default_factory=dict)
     # "" means unspecified — valid when the caller doesn't care.
     layout: Layout = ""
 
@@ -69,12 +72,14 @@ class HookManager:
         # Per-cell labels are cleared after every run(): batches carry
         # different cell ids, so silent reuse of stale ids would misalign
         # the h5 sidecar columns.
-        self.current_per_cell: dict[str, torch.Tensor] = {}
+        self.current_per_cell: dict[str, torch.Tensor | np.ndarray] = {}
 
     def set_tag(self, key: str, value: str) -> None:
         self.current_tags[key] = value
 
-    def set_per_cell(self, per_cell: dict[str, torch.Tensor]) -> None:
+    def set_per_cell(
+        self, per_cell: dict[str, torch.Tensor | np.ndarray]
+    ) -> None:
         self.current_per_cell = dict(per_cell)
 
     def __enter__(self) -> HookManager:
