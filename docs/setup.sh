@@ -8,5 +8,5 @@ cd "$DOCS_DIR"
 echo "==> Setting up docs venv..."
 uv venv --python 3.12 --clear .venv
 source .venv/bin/activate
-uv pip install docling
+uv pip install docling paperscraper
 echo "==> docs venv ready at $DOCS_DIR/.venv"

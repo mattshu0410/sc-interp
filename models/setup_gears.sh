@@ -35,5 +35,10 @@ uv pip install "nnsight>=0.5,<0.6" "h5py"
 
 # Smoke test
 python -c "import gears; from gears import PertData, GEARS; print('gears import OK')"
+# If running on the kevinjaro workstation (i9-13900K with Vmin-Shift P-core
+# degradation), the line above miscompiles ~95% of the time on cold numba
+# cache. Comment it out and use the taskset variant below to pin the first
+# import to the E-cores; once the .nbc cache is warm everything else is fine.
+# taskset -c 16-31 python -c "import gears; from gears import PertData, GEARS; print('gears import OK')"
 
 echo "==> GEARS environment ready at $MODEL_DIR/.venv"
