@@ -19,7 +19,7 @@ import functools
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import anndata as ad
 import numpy as np
@@ -28,15 +28,22 @@ import pandas as pd
 import cellflow
 import cellflow.preprocessing as cfpp
 import cellflow.training as cftrain
+import jax.numpy as jnp
 import optax
+import torch
+from cellflow.data._dataloader import PredictionSampler
 from cellflow.model import CellFlow
 from cellflow.preprocessing import get_esm_embedding
 from ott.solvers import utils as solver_utils
+from tqdm import tqdm
 
 from scripts import wb
 from scripts.cache import TrainStats, cache_or_train
 from scripts.data.genes import build_symbol_to_id
 from scripts.data.splits import load_split
+from scripts.interp.cellflow_extractor import CellflowActivationCapture
+from scripts.interp.cellflow_probes import patch_velocity_field
+from scripts.interp.hook_sinks import H5ActivationSink, default_activation_out
 from scripts.manifest import Manifest
 from scripts.runner import RunnerSpec
 
@@ -391,7 +398,9 @@ def predict(cf: CellFlow, inputs: CellFlowInputs) -> dict:
     # wants an AnnData with the PCA'd predictions in obsm, and writes the
     # reconstructed gene-space values to adata.layers[layers_key_added].
     preds_gene: dict[str, np.ndarray] = {}
-    for cond, arr in preds_pca.items():
+    for cond, arr in tqdm(
+        preds_pca.items(), total=len(preds_pca), desc="cellflow pca→gene"
+    ):
         arr = np.asarray(np.squeeze(arr))
         tmp_adata = ad.AnnData(
             X=np.empty((arr.shape[0], inputs.adata_train.n_vars), dtype=np.float32),
@@ -406,6 +415,106 @@ def predict(cf: CellFlow, inputs: CellFlowInputs) -> dict:
             layers_key_added="X_recon",
         )
         preds_gene[cond] = np.asarray(tmp_adata.layers["X_recon"])
+    return preds_gene
+
+
+def _iter_predict_inputs(
+    cf: CellFlow, inputs: CellFlowInputs
+) -> Iterator[tuple[str, np.ndarray, dict]]:
+    """Yield (cond_key, source_x, cond_dict) for every test condition.
+
+    Mirrors the preamble of cf.predict (get_prediction_data →
+    PredictionSampler.sample) so our capture pass sees the identical
+    per-condition inputs the real prediction saw, without calling
+    cf.predict a second time.
+    """
+    adata_ctrl = inputs.adata_test[inputs.adata_test.obs["control"].values]
+    test_obs = inputs.adata_test[~inputs.adata_test.obs["control"].values].obs
+    covariate_data = test_obs.drop_duplicates(subset=["gene_1", "gene_2"]).copy()
+
+    pred_data = cf._dm.get_prediction_data(
+        adata_ctrl,
+        sample_rep="X_pca",
+        covariate_data=covariate_data,
+        condition_id_key="condition",
+    )
+    sampler = PredictionSampler(pred_data)
+    batch = sampler.sample()
+    # batch["source"]/["condition"] keys are the condition strings returned
+    # by PredictionSampler._get_key (== perturbation_idx_to_id value), so
+    # no extra translation needed.
+    for cond_key in batch["source"]:
+        yield cond_key, batch["source"][cond_key], batch["condition"][cond_key]
+
+
+def predict_with_capture(
+    cf: CellFlow,
+    inputs: CellFlowInputs,
+    activation_out: Path,
+    capture_dtype: torch.dtype,
+    gene_symbols: np.ndarray,
+    args: argparse.Namespace,
+) -> dict:
+    """Run real cf.predict, then a second pass at fixed timesteps to capture
+    sow'd activations into an H5ActivationSink. Returns the real predictions
+    (unchanged from the default path)."""
+    vf_module = cf._solver.vf
+    params = cf._solver.vf_state_inference.params
+    cond_embedding_dim = cf._solver.vf.condition_embedding_dim
+
+    targets = [
+        "time_enc", "x_enc", "condition_mean",
+        "pre_decoder", "decoder", "output",
+    ]
+
+    preds_gene = predict(cf, inputs)
+
+    # Patch only the capture pass. `predict(cf, inputs)` above never asks
+    # for intermediates, so sows are free there; and the second-pass
+    # capture below calls `vf_module.apply(...)` directly, bypassing
+    # `cf._solver._predict_fn_cache` entirely — cache staleness is moot.
+    patch_velocity_field()
+
+    sink = H5ActivationSink(
+        activation_out,
+        runner="cellflow",
+        dataset=args.dataset,
+        split=args.split,
+        capture_names=targets,
+        extra_meta={
+            "gene_symbols": gene_symbols,
+            "pca_dim": int(inputs.adata_train.obsm["X_pca"].shape[1]),
+            "timesteps": np.asarray(
+                [0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32
+            ),
+        },
+        batches_per_shard=args.batches_per_shard,
+    )
+
+    with sink, CellflowActivationCapture(
+        vf_module=vf_module,
+        params=params,
+        capture_names=targets,
+        sink=sink,
+        capture_dtype=capture_dtype,
+    ) as cap:
+        cap.set_tag("phase", "predict")
+        enc_noise = jnp.zeros((1, cond_embedding_dim), dtype=jnp.float32)
+        cell_offset = 0
+        # PredictionSampler.sample() already materializes all conditions in
+        # memory, so list() costs nothing and gives tqdm a real total.
+        conditions = list(_iter_predict_inputs(cf, inputs))
+        for cond_str, source_x, cond_emb in tqdm(
+            conditions, total=len(conditions), desc="cellflow capture"
+        ):
+            bs = source_x.shape[0]
+            cap.set_per_cell({
+                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "condition": np.array([cond_str] * bs, dtype=object),
+            })
+            cap.run(jnp.asarray(source_x), cond_emb, enc_noise)
+            cell_offset += bs
+
     return preds_gene
 
 
@@ -504,7 +613,23 @@ def _predict(
     cf: CellFlow, inputs: CellFlowInputs, args: argparse.Namespace
 ) -> dict:
     """Run cf.predict on held-out test perturbations."""
-    return predict(cf, inputs)
+    if not getattr(args, "capture_activations", False):
+        return predict(cf, inputs)
+    activation_out = args.activation_out or default_activation_out(
+        REPO_ROOT, "cellflow", args.dataset, args.split
+    )
+    capture_dtype = {
+        "fp32": torch.float32,
+        "fp16": torch.float16,
+    }[args.capture_dtype]
+    print(
+        f"==> capturing activations to {activation_out} "
+        f"(dtype={args.capture_dtype})"
+    )
+    gene_symbols = inputs.adata_train.var_names.to_numpy().astype(object)
+    return predict_with_capture(
+        cf, inputs, activation_out, capture_dtype, gene_symbols, args
+    )
 
 
 def _save_predictions(

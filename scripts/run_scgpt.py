@@ -37,6 +37,7 @@ import pandas as pd
 import torch
 from gears import PertData
 from nnsight import NNsight
+from tqdm import tqdm
 
 from scgpt.loss import masked_mse_loss
 from scgpt.model import TransformerGenerator
@@ -512,7 +513,7 @@ def predict(
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in loader:
+    for batch in tqdm(loader, total=len(loader), desc="scgpt predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
         p = model.pred_perturb(
@@ -541,6 +542,7 @@ def predict_with_capture(
     capture_dtype: torch.dtype,
     dataset: str,
     split: str,
+    batches_per_shard: int | None = None,
 ) -> dict:
     """predict() variant that captures per-layer hidden states via HookManager.
 
@@ -593,13 +595,14 @@ def predict_with_capture(
             "gene_symbols": gene_symbols,
             "include_zero_gene": include_zero_gene,
         },
+        batches_per_shard=batches_per_shard,
     )
     with sink, HookManager(
         nn_model, capture=targets, sink=sink, capture_dtype=capture_dtype
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in loader:
+        for batch in tqdm(loader, total=len(loader), desc="scgpt capture"):
             pert_cat.extend(batch.pert)
             fa = build_forward_args(
                 batch, gene_ids, include_zero_gene, device, max_seq_len
@@ -779,6 +782,7 @@ def _predict(
         capture_dtype,
         args.dataset,
         args.split,
+        batches_per_shard=args.batches_per_shard,
     )
 
 

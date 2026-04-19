@@ -52,7 +52,12 @@ def materialise(
     print(f"==> materialising gears split for {manifest.name} ({gears_name})")
     print(f"    split_type={split_type}, seed={seed}, tgss={train_gene_set_size}")
 
-    pert_data = PertData(str(data_dir))
+    # default_pert_graph=False: matches scripts/run_gears.py. PertData caches
+    # pert_idx in cell_graphs.pkl indexing whichever pert_names was active at
+    # build time, and reuses the cache blindly on reload — if this flag
+    # disagrees with the runner, the runner's model.forward does out-of-bounds
+    # lookups into pert_emb (num_perts ≠ pkl's index space).
+    pert_data = PertData(str(data_dir), default_pert_graph=False)
     pert_data.load(data_name=gears_name)
     pert_data.prepare_split(
         split=split_type,
