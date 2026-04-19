@@ -117,7 +117,19 @@ class H5ActivationSink:
                 raise ValueError(
                     f"extra_meta may not override reserved field {k!r}"
                 )
-            meta_grp.attrs[k] = v
+            # Array-typed values (e.g. norman's ~5k gene_symbols) overflow the
+            # 64KB HDF5 object-header limit when stored as attrs. Route any
+            # array/list to a dataset under /meta/<k>; scalars stay as attrs.
+            if isinstance(v, (np.ndarray, list, tuple)):
+                arr = np.asarray(v)
+                if arr.dtype == object:
+                    meta_grp.create_dataset(
+                        k, data=arr, dtype=h5py.string_dtype(encoding="utf-8")
+                    )
+                else:
+                    meta_grp.create_dataset(k, data=arr)
+            else:
+                meta_grp.attrs[k] = v
         return self
 
     def write(self, record: ActivationRecord) -> None:

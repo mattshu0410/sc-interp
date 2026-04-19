@@ -224,10 +224,36 @@ def test_h5_extra_meta_accepts_array_values(tmp_path: Path) -> None:
         sink.write(_rec("lin", torch.zeros(1, 2), {}))
 
     with h5py.File(path, "r") as f:
-        m = f["meta"].attrs
-        got = [s.decode() if isinstance(s, bytes) else s for s in m["gene_symbols"]]
+        # Arrays land under /meta/<k> as datasets (attr 64KB cap won't fit
+        # real-world gene lists). Scalars stay as attrs.
+        gs = f["meta/gene_symbols"][:]
+        got = [s.decode() if isinstance(s, bytes) else s for s in gs]
         assert got == ["TP53", "ETS2", "CNN1"]
-        assert int(m["num_genes"]) == 3
+        assert int(f["meta"].attrs["num_genes"]) == 3
+
+
+def test_h5_extra_meta_handles_large_string_array(tmp_path: Path) -> None:
+    # Norman's gene_symbols (~5k strings) overflows the 64KB attr header;
+    # the dataset path must accommodate that. 8000 strings is comfortably past.
+    path = tmp_path / "act.h5"
+    genes = np.array([f"GENE{i:05d}" for i in range(8000)], dtype=object)
+    with H5ActivationSink(
+        path,
+        runner="gears",
+        dataset="norman",
+        split="test",
+        capture_names=["gene_emb"],
+        extra_meta={"gene_symbols": genes},
+    ) as sink:
+        sink.write(_rec("gene_emb", torch.zeros(1, 4), {}))
+
+    with h5py.File(path, "r") as f:
+        gs = f["meta/gene_symbols"][:]
+        assert gs.shape == (8000,)
+        first = gs[0].decode() if isinstance(gs[0], bytes) else gs[0]
+        last = gs[-1].decode() if isinstance(gs[-1], bytes) else gs[-1]
+        assert first == "GENE00000"
+        assert last == "GENE07999"
 
 
 def test_path_escaping_prevents_collision(tmp_path: Path) -> None:
