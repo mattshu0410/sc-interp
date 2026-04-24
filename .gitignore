@@ -1,6 +1,7 @@
 # Virtual environments
 .venv/
 venv/
+.uv-python/
 
 # Python
 __pycache__/
@@ -36,6 +37,9 @@ docs/papers/*.pdf
 
 # Claude Code local session state
 .claude/
+
+# Personal planning notes (local only)
+plans/
 
 # OS
 .DS_Store

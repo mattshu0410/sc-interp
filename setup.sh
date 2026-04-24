@@ -54,6 +54,20 @@ fi
 
 echo "==> uv $(uv --version)"
 
+# ── Shared uv-managed pythons ────────────────────────────────────────────────
+# Every sub-setup inherits this env var, so all venvs across tools/docs/models
+# symlink to the same group-readable interpreter instead of whichever user's
+# ~/.local/ ran setup. scgpt pins 3.11; everything else pins 3.12.
+export UV_PYTHON_INSTALL_DIR="$REPO_ROOT/.uv-python"
+mkdir -p "$UV_PYTHON_INSTALL_DIR"
+chmod g+ws "$UV_PYTHON_INSTALL_DIR"
+for py in 3.11 3.12; do
+    if ! compgen -G "$UV_PYTHON_INSTALL_DIR/cpython-$py-*" >/dev/null; then
+        echo "==> Installing Python $py to $UV_PYTHON_INSTALL_DIR..."
+        uv python install "$py"
+    fi
+done
+
 # ── Init submodules ──────────────────────────────────────────────────────────
 echo "==> Initialising git submodules..."
 git submodule update --init --recursive
