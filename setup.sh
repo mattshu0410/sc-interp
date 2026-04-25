@@ -79,6 +79,13 @@ echo "  Running: tools/setup.sh"
 echo "================================================================"
 bash tools/setup.sh
 
+# ── Setup the diffing venv ───────────────────────────────────────────────────
+echo ""
+echo "================================================================"
+echo "  Running: tools/diffing/setup.sh"
+echo "================================================================"
+bash tools/diffing/setup.sh
+
 # ── Setup the docs venv (docling for paper conversion) ───────────────────────
 echo ""
 echo "================================================================"

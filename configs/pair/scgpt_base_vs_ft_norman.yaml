@@ -1,0 +1,9 @@
+name: scgpt_base_vs_ft_norman
+a:
+  path: predictions/scgpt_base_norman_train.activations.h5
+  tags: {}
+b:
+  path: predictions/scgpt_norman_ft_norman_train.activations.h5
+  tags: {}
+alignment: identity
+relationship: finetune_vs_base

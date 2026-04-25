@@ -1,0 +1,8 @@
+defaults:
+  - method: ???
+  - pair: ???
+  - capture: layer_11
+  - _self_
+
+mode: x
+out: predictions/diff/${pair.name}/${method.name}/${capture.name}.h5

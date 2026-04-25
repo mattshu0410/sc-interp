@@ -1,0 +1,5 @@
+name: pca
+training:
+  n_components: 50
+  batch_size: 4096
+  target: b_minus_a
