@@ -26,6 +26,7 @@ import json
 import time
 import warnings
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -507,13 +508,18 @@ def predict(
     gene_ids: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
+    limit_num_batches: int | None = None,
 ) -> dict:
     model.eval()
     pert_cat: list[str] = []
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in tqdm(loader, total=len(loader), desc="scgpt predict"):
+    # islice truncates the iterator so tqdm's total matches what actually
+    # runs, and we don't pre-fetch one extra batch only to drop it on break.
+    total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+    it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+    for batch in tqdm(it, total=total, desc="scgpt predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
         p = model.pred_perturb(
@@ -543,6 +549,7 @@ def predict_with_capture(
     dataset: str,
     split: str,
     batches_per_shard: int | None = None,
+    limit_num_batches: int | None = None,
 ) -> dict:
     """predict() variant that captures per-layer hidden states via HookManager.
 
@@ -602,7 +609,9 @@ def predict_with_capture(
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in tqdm(loader, total=len(loader), desc="scgpt capture"):
+        total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+        it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+        for batch in tqdm(it, total=total, desc="scgpt capture"):
             pert_cat.extend(batch.pert)
             fa = build_forward_args(
                 batch, gene_ids, include_zero_gene, device, max_seq_len
@@ -615,6 +624,7 @@ def predict_with_capture(
             hm.set_per_cell({
                 "cell_id": torch.arange(cell_offset, cell_offset + bs),
                 "pert": np.array(batch.pert, dtype=object),
+                "obs_name": np.array(batch.obs_name, dtype=object),
                 "gene_dataset_ids": fa.input_gene_ids.unsqueeze(0).expand(bs, -1).contiguous().cpu(),
             })
             output_dict = hm.run(
@@ -722,6 +732,13 @@ def _add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--amp", action="store_true", default=True)
     p.add_argument("--max-seq-len", type=int, default=1536)
+    p.add_argument(
+        "--skip-finetune",
+        action="store_true",
+        help="always use the raw pretrained whole-human checkpoint, ignoring "
+        "any cached finetune artifacts. Default output paths gain a _non_ft "
+        "suffix so back-to-back runs don't clobber finetuned predictions.",
+    )
 
 
 def _train_or_load(
@@ -738,6 +755,16 @@ def _train_or_load(
     gene_ids = build_gene_ids(inputs.var, vocab)
     model = build_model(margs, vocab).to(device)
     load_pretrained_weights(model, args.pretrained_dir / "best_model.pt", device)
+
+    if args.skip_finetune:
+        print("==> --skip-finetune: capturing on raw pretrained whole-human weights")
+        stats = TrainStats(
+            wall_clock_s=0.0,
+            wandb_run_url=None,
+            reason="skipped",
+            details={"mode": "skip_finetune", "pretrained_dir": str(args.pretrained_dir)},
+        )
+        return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
 
     model, stats = maybe_finetune(model, inputs, gene_ids, dataset, device, args)
     return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
@@ -759,10 +786,12 @@ def _predict(
     print(f"==> running inference on {args.split} split")
     if not args.capture_activations:
         return predict(
-            trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
+            trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device,
+            limit_num_batches=args.limit_num_batches,
         )
+    activation_suffix = "_non_ft" if args.skip_finetune else ""
     activation_out = args.activation_out or default_activation_out(
-        REPO_ROOT, "scgpt", args.dataset, args.split
+        REPO_ROOT, "scgpt", args.dataset, args.split, suffix=activation_suffix
     )
     capture_dtype = {"fp32": torch.float32, "fp16": torch.float16}[args.capture_dtype]
     print(f"==> capturing activations to {activation_out} (dtype={args.capture_dtype})")
@@ -783,6 +812,7 @@ def _predict(
         args.dataset,
         args.split,
         batches_per_shard=args.batches_per_shard,
+        limit_num_batches=args.limit_num_batches,
     )
 
 

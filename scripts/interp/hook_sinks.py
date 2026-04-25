@@ -11,12 +11,17 @@ from scripts.interp.hooks import ActivationRecord
 
 
 def default_activation_out(
-    repo_root: Path, runner: str, dataset: str, split: str
+    repo_root: Path, runner: str, dataset: str, split: str, suffix: str = ""
 ) -> Path:
     # Canonical on-disk location for captured activations. Shared vocabulary
     # with downstream probe/SAE/patching scripts so they can find files by
-    # (runner, dataset, split) without duplicating the f-string.
-    return repo_root / "predictions" / f"{runner}_{dataset}_{split}.activations.h5"
+    # (runner, dataset, split) without duplicating the f-string. `suffix` is
+    # used by run_scgpt with --skip-finetune to avoid clobbering finetuned
+    # captures with raw-pretrained ones.
+    return (
+        repo_root / "predictions"
+        / f"{runner}_{dataset}_{split}{suffix}.activations.h5"
+    )
 
 
 def _escape_segment(s: str) -> str:

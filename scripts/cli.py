@@ -73,5 +73,12 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
         "rotates into shard-NNNNN.h5 files every N batches; default is a "
         "single .h5 file",
     )
+    p.add_argument(
+        "--limit-num-batches",
+        type=int,
+        default=None,
+        help="stop the predict/capture loop after this many batches; partial "
+        "dry-run helper for writing exactly M shards over N batches",
+    )
     wb.add_args(p)
     return p

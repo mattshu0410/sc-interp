@@ -46,3 +46,18 @@ def test_capture_format_choices() -> None:
 
     with pytest.raises(SystemExit):
         common_parser().parse_args(_minimal(["--capture-format", "parquet"]))
+
+
+def test_limit_num_batches_default_none() -> None:
+    args = common_parser().parse_args(_minimal())
+    assert args.limit_num_batches is None
+
+
+def test_limit_num_batches_parses_int() -> None:
+    args = common_parser().parse_args(_minimal(["--limit-num-batches", "8"]))
+    assert args.limit_num_batches == 8
+
+
+def test_batches_per_shard_default_none() -> None:
+    args = common_parser().parse_args(_minimal())
+    assert args.batches_per_shard is None

@@ -16,10 +16,51 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import pickle
 from pathlib import Path
 
 from scripts.data.splits import write_split
 from scripts.manifest import REPO_ROOT, Manifest
+
+
+def _stamp_obs_names(pert_data, pkl_path: Path) -> None:
+    """Write per-cell `obs_name` (AnnData barcode) onto every Data in cell_graphs.pkl.
+
+    GEARS' create_cell_graph_dataset iterates `for cell_z in adata_.X` where
+    `adata_ = adata[obs.condition == cond]`, so under num_samples=1 (the gears
+    default) the i-th Data in the per-condition list maps 1:1 to obs_names[i]
+    of that slice. Without this stamp the capture h5 only carries cell_id
+    (running index) and pert, leaving no way to join activations back to a
+    specific source cell in the original AnnData.
+
+    Idempotent: running it twice writes the same obs_name attr.
+    """
+    print(f"==> stamping obs_name onto Data objects in {pkl_path}")
+    with open(pkl_path, "rb") as f:
+        cell_graphs = pickle.load(f)
+
+    adata = pert_data.adata
+    obs_by_cond = adata.obs["condition"]
+    stamped = 0
+    for cond, data_list in cell_graphs.items():
+        obs_names = adata[obs_by_cond == cond].obs_names.to_numpy()
+        if len(data_list) != len(obs_names):
+            # num_samples > 1 would produce len(data_list) == num_samples *
+            # len(obs_names); the runner doesn't override num_samples today,
+            # but if that changes, a stride mapping (i // num_samples) is
+            # the fix. Refuse rather than silently misalign barcodes.
+            raise RuntimeError(
+                f"length mismatch for condition {cond!r}: "
+                f"{len(data_list)} graphs vs {len(obs_names)} adata rows. "
+                f"Likely num_samples != 1 in create_cell_graph_dataset."
+            )
+        for i, data in enumerate(data_list):
+            data.obs_name = str(obs_names[i])
+        stamped += len(data_list)
+
+    with open(pkl_path, "wb") as f:
+        pickle.dump(cell_graphs, f)
+    print(f"    stamped {stamped} Data objects across {len(cell_graphs)} conditions")
 
 
 def materialise(
@@ -67,6 +108,16 @@ def materialise(
     # lookups into pert_emb (num_perts ≠ pkl's index space).
     pert_data = PertData(str(data_dir), default_pert_graph=False)
     pert_data.load(data_name=gears_name)
+
+    # Add obs_name (AnnData cell barcode) to every Data in cell_graphs.pkl so
+    # capture h5s can join back to the source AnnData by row, not just by
+    # perturbation. Stock gears never writes this attr; we patch it post-load
+    # so the cache stays consumable by both runner venvs (gears submodule and
+    # scgpt's PyPI cell-gears) without a vendored library edit.
+    _stamp_obs_names(
+        pert_data, Path(data_dir) / gears_name / "data_pyg" / "cell_graphs.pkl"
+    )
+
     pert_data.prepare_split(
         split=split_type,
         seed=seed,

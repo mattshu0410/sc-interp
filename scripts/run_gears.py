@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -163,7 +164,12 @@ def maybe_train(
 
 
 @torch.no_grad()
-def predict(model: GEARS, loader: Iterable, device: torch.device) -> dict:
+def predict(
+    model: GEARS,
+    loader: Iterable,
+    device: torch.device,
+    limit_num_batches: int | None = None,
+) -> dict:
     """Per-cell forward pass over the test loader.
 
     Iterates pert_data.dataloader['test_loader'] batch-by-batch, calls
@@ -177,7 +183,11 @@ def predict(model: GEARS, loader: Iterable, device: torch.device) -> dict:
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in tqdm(loader, total=len(loader), desc="gears predict"):
+    # islice truncates the iterator so tqdm's total matches what actually
+    # runs, and we don't pre-fetch one extra batch only to drop it on break.
+    total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+    it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+    for batch in tqdm(it, total=total, desc="gears predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
         p = model.best_model(batch)
@@ -202,6 +212,7 @@ def predict_with_capture(
     split: str,
     gene_symbols: np.ndarray,
     batches_per_shard: int | None = None,
+    limit_num_batches: int | None = None,
 ) -> dict:
     """predict() variant that captures GEARS submodule outputs via HookManager.
 
@@ -268,13 +279,16 @@ def predict_with_capture(
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in tqdm(loader, total=len(loader), desc="gears capture"):
+        total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+        it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+        for batch in tqdm(it, total=total, desc="gears capture"):
             batch.to(device)
             pert_cat.extend(batch.pert)
             bs = batch.num_graphs
             hm.set_per_cell({
                 "cell_id": torch.arange(cell_offset, cell_offset + bs),
                 "pert": np.array(batch.pert, dtype=object),
+                "obs_name": np.array(batch.obs_name, dtype=object),
             })
             p = hm.run(batch)
             preds.extend(p.cpu())
@@ -395,7 +409,7 @@ def _predict(
     device = next(model.best_model.parameters()).device
     print(f"==> running inference on {args.split} split")
     if not args.capture_activations:
-        return predict(model, loader, device)
+        return predict(model, loader, device, limit_num_batches=args.limit_num_batches)
     activation_out = args.activation_out or default_activation_out(
         REPO_ROOT, "gears", args.dataset, args.split
     )
@@ -415,6 +429,7 @@ def _predict(
         args.split,
         gene_symbols,
         batches_per_shard=args.batches_per_shard,
+        limit_num_batches=args.limit_num_batches,
     )
 
 

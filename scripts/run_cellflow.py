@@ -503,7 +503,12 @@ def predict_with_capture(
         cell_offset = 0
         # PredictionSampler.sample() already materializes all conditions in
         # memory, so list() costs nothing and gives tqdm a real total.
+        # Already materialised; slice rather than islice + late break so the
+        # tqdm total matches the actual loop length and no extra condition
+        # is iterated past the cap.
         conditions = list(_iter_predict_inputs(cf, inputs))
+        if args.limit_num_batches is not None:
+            conditions = conditions[: args.limit_num_batches]
         for cond_str, source_x, cond_emb in tqdm(
             conditions, total=len(conditions), desc="cellflow capture"
         ):
@@ -614,6 +619,16 @@ def _predict(
 ) -> dict:
     """Run cf.predict on held-out test perturbations."""
     if not getattr(args, "capture_activations", False):
+        # cellflow's plain predict path is condition-driven, not batch-driven
+        # (one cf.predict call returns a dict keyed by perturbation), so
+        # truncating it on a batch count is meaningless. Refuse loudly rather
+        # than silently dropping the flag — capture path honors it.
+        if args.limit_num_batches is not None:
+            raise SystemExit(
+                "--limit-num-batches has no effect on cellflow without "
+                "--capture-activations; capture path is the only one that "
+                "iterates per-condition batches."
+            )
         return predict(cf, inputs)
     activation_out = args.activation_out or default_activation_out(
         REPO_ROOT, "cellflow", args.dataset, args.split

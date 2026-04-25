@@ -35,9 +35,11 @@ class RunnerSpec:
     ]
 
 
-def default_output(runner_name: str, dataset: str, split: str) -> Path:
-    """predictions/<runner>_<dataset>_<split>.h5ad under the repo root."""
-    return REPO_ROOT / "predictions" / f"{runner_name}_{dataset}_{split}.h5ad"
+def default_output(
+    runner_name: str, dataset: str, split: str, suffix: str = ""
+) -> Path:
+    """predictions/<runner>_<dataset>_<split>{suffix}.h5ad under the repo root."""
+    return REPO_ROOT / "predictions" / f"{runner_name}_{dataset}_{split}{suffix}.h5ad"
 
 
 def run(spec: RunnerSpec, argv: list[str] | None = None) -> None:
@@ -54,7 +56,15 @@ def run(spec: RunnerSpec, argv: list[str] | None = None) -> None:
         inputs = spec.load_inputs(manifest, args)
         model, stats = spec.train_or_load(inputs, args.dataset, args)
         preds = spec.predict(model, inputs, args)
-        output = args.output or default_output(spec.name, args.dataset, args.split)
+        # `--skip-finetune` (currently scgpt-only) means we're predicting from
+        # raw pretrained weights, not the dataset-finetuned cache. Suffix the
+        # default output so back-to-back runs don't silently overwrite the
+        # finetuned predictions h5ad. `getattr` keeps runner.run agnostic of
+        # which runners declare the flag.
+        suffix = "_non_ft" if getattr(args, "skip_finetune", False) else ""
+        output = args.output or default_output(
+            spec.name, args.dataset, args.split, suffix=suffix
+        )
         spec.save_predictions(preds, inputs, manifest, args, stats, output)
     finally:
         wb.finish()
