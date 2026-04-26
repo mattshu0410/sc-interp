@@ -1,4 +1,4 @@
-You need to update models/scgpt/scgpt/tokenizer/gene_tokenizer.py with this diff:
+You need to update models/scgpt/scgpt/tokenizer/gene_tokenizer.py with this diff to remove the torchtext dependency:
 
 ---
 import json

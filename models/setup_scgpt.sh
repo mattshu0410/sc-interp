@@ -31,7 +31,11 @@ uv pip install \
     "datasets" \
     "wandb"
 
-uv pip install "cell-gears<0.0.3" "torch-geometric"
+# Pinned to 0.1.2 to match tools/.venv: scgpt and the materialiser share
+# data/<dataset>/cell_graphs.pkl, and the on-disk Data layout differs across
+# the 0.0.x → 0.1.x boundary (1-col x + Data.pert_idx vs 2-col x). The
+# runner's _load_gears patches x to the 2-col layout in memory.
+uv pip install "cell-gears==0.1.2" "torch-geometric"
 
 # --no-deps to bypass scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .
