@@ -33,6 +33,8 @@ def materialise(
     Returns the path of the JSON written. Raises ValueError if manifest.source
     is not 'gears'.
     """
+    import numpy as np
+
     from gears import PertData
 
     if manifest.source != "gears":
@@ -52,6 +54,12 @@ def materialise(
     print(f"==> materialising gears split for {manifest.name} ({gears_name})")
     print(f"    split_type={split_type}, seed={seed}, tgss={train_gene_set_size}")
 
+    # PertData.load -> create_cell_graph_dataset draws control basals with
+    # np.random.randint and never seeds it itself, so a fresh-clone rerun
+    # produces a differently-paired cell_graphs.pkl. Seed the global numpy
+    # RNG before load() so the .pkl (and therefore every downstream batch
+    # order and shard layout) is reproducible from clean state.
+    np.random.seed(seed)
     # default_pert_graph=False: matches scripts/run_gears.py. PertData caches
     # pert_idx in cell_graphs.pkl indexing whichever pert_names was active at
     # build time, and reuses the cache blindly on reload — if this flag
