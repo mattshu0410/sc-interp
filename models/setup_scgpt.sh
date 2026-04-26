@@ -2,16 +2,26 @@
 # Setup environment for scGPT (inference-only for perturbation prediction)
 # Called from the repo root: ./models/setup_scgpt.sh
 #
-# torchtext was replaced with an in-tree GeneVocab shim, so torch is no longer
-# pinned to 2.3.0 and nnsight installs cleanly without --no-deps workarounds.
+# Upstream scgpt depends on torchtext.vocab, which has been archived. We carry
+# a torchtext-free GeneVocab replacement at models/scgpt_patches/gene_tokenizer.py
+# and overlay it into the submodule below — this lets us track upstream cleanly
+# and frees torch from the 2.3.0 pin, so nnsight installs without --no-deps.
 # scgpt itself is still installed --no-deps to bypass the scvi-tools<1.0 pin.
 
 set -euo pipefail
 
+PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scgpt_patches" && pwd)"
 MODEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scgpt" && pwd)"
 cd "$MODEL_DIR"
 
 echo "==> Setting up scGPT environment..."
+
+# Overlay the gene_tokenizer.py shim onto the submodule. Idempotent — the cp
+# just rewrites the same bytes if already applied. Re-run this script after
+# any `git submodule update` to restore the patch (submodule update resets
+# the working tree).
+cp "$PATCH_DIR/gene_tokenizer.py" "$MODEL_DIR/scgpt/tokenizer/gene_tokenizer.py"
+echo "==> applied patch: scgpt/tokenizer/gene_tokenizer.py"
 
 uv venv --python 3.11 --clear .venv
 source .venv/bin/activate
@@ -31,7 +41,11 @@ uv pip install \
     "datasets" \
     "wandb"
 
-uv pip install "cell-gears<0.0.3" "torch-geometric"
+# Pinned to 0.1.2 to match tools/.venv: scgpt and the materialiser share
+# data/<dataset>/cell_graphs.pkl, and the on-disk Data layout differs across
+# the 0.0.x → 0.1.x boundary (1-col x + Data.pert_idx vs 2-col x). The
+# runner's _load_gears patches x to the 2-col layout in memory.
+uv pip install "cell-gears==0.1.2" "torch-geometric"
 
 # --no-deps to bypass scvi-tools<1.0, orbax<0.1.8, etc.
 uv pip install --no-deps -e .

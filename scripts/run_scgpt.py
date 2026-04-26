@@ -77,10 +77,45 @@ class ScgptInputs:
     var: pd.DataFrame
 
 
+def _ensure_legacy_x_layout(pert_data) -> None:
+    """Append a per-gene perturbation flag column to each Data.x in place.
+
+    cell-gears 0.1.x stores Data.x as (n_genes, 1) with a Data.pert_idx
+    attribute that indexes into pert_data.pert_names (a GO-derived list,
+    not the dataset gene axis). scGPT's pred_perturb and this runner's
+    build_forward_args read x[:, 1] expecting a 0/1 gene-axis flag (the
+    legacy 0.0.x layout). Map pert_idx → pert_names[i] → gene_names.index
+    and write the flag column. Idempotent: bails on the first already-2-col
+    Data since the layout is uniform across the dict.
+    """
+    pert_names = list(pert_data.pert_names)
+    gene_names = list(pert_data.adata.var["gene_name"])
+    pert_to_gene = {
+        i: gene_names.index(p)
+        for i, p in enumerate(pert_names)
+        if p in gene_names
+    }
+    for plist in pert_data.dataset_processed.values():
+        for d in plist:
+            if d.x.shape[1] >= 2:
+                return
+            flags = torch.zeros(d.x.shape[0], 1, dtype=d.x.dtype)
+            for p in d.pert_idx:
+                gi = pert_to_gene.get(int(p))
+                if gi is not None:
+                    flags[gi, 0] = 1.0
+            d.x = torch.cat([d.x, flags], dim=1)
+
+
 def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     """Build GEARS dataloaders for a manifest whose source is 'gears'."""
-    pert_data = PertData(str(REPO_ROOT / "data"))
+    # default_pert_graph=False: must match scripts/data/gears.py — the cached
+    # cell_graphs.pkl stores pert_idx values indexing whichever pert_names was
+    # active when it was written. Disagreeing here makes the legacy-x adapter
+    # below resolve indices against the wrong list.
+    pert_data = PertData(str(REPO_ROOT / "data"), default_pert_graph=False)
     pert_data.load(data_name=manifest.raw["gears_name"])
+    _ensure_legacy_x_layout(pert_data)
     pert_data.prepare_split(
         split=manifest.raw.get("split", {}).get("default", args.split_type),
         seed=args.seed,
