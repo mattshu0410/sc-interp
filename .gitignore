@@ -19,6 +19,7 @@ data/**
 !data/*.sh
 !data/manifests/
 !data/manifests/*.yaml
+cache
 
 # Model artifacts (downloaded via setup scripts)
 _artifacts/
