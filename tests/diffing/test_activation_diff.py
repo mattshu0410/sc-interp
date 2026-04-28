@@ -44,7 +44,7 @@ def test_activation_diff_known_answer(tmp_path: Path) -> None:
 
     path_a = tmp_path / "a.h5"
     path_b = tmp_path / "b.h5"
-    path_out = tmp_path / "scores.h5"
+    out_dir = tmp_path / "out"
     _write_activations(path_a, capture, a, labels={"cell_id": np.arange(n)})
     _write_activations(path_b, capture, b)
 
@@ -54,11 +54,12 @@ def test_activation_diff_known_answer(tmp_path: Path) -> None:
             "--a", str(path_a),
             "--b", str(path_b),
             "--capture", capture,
-            "--out", str(path_out),
+            "--out-dir", str(out_dir),
             "--relationship", "finetune_vs_base",
         ]
     )
 
+    path_out = out_dir / "default" / "scores.h5"
     with H5ActivationReader(path_out) as r:
         l2, l2_labels = r.read("l2_per_cell")
         cosine, _ = r.read("cosine_per_cell")
@@ -96,7 +97,7 @@ def test_activation_diff_streams_across_chunks(tmp_path: Path) -> None:
 
     path_a = tmp_path / "a.h5"
     path_b = tmp_path / "b.h5"
-    path_out = tmp_path / "scores.h5"
+    out_dir = tmp_path / "out"
     _write_activations(path_a, capture, a)
     _write_activations(path_b, capture, b)
 
@@ -106,10 +107,11 @@ def test_activation_diff_streams_across_chunks(tmp_path: Path) -> None:
             "--a", str(path_a),
             "--b", str(path_b),
             "--capture", capture,
-            "--out", str(path_out),
+            "--out-dir", str(out_dir),
         ]
     )
 
+    path_out = out_dir / "default" / "scores.h5"
     with H5ActivationReader(path_out) as r:
         l2, _ = r.read("l2_per_cell")
         mean_abs, _ = r.read("mean_abs_per_dim")

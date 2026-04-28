@@ -29,7 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Capture name (hook/layer) shared between A and B.",
     )
-    p.add_argument("--out", required=True, type=Path, help="h5 path for score output.")
+    p.add_argument(
+        "--out-dir",
+        required=True,
+        type=Path,
+        help="Output dir; scores.h5 (and any method checkpoint) is written under "
+        "<out-dir>/<config_tag>/.",
+    )
     p.add_argument(
         "--alignment",
         default="identity",
@@ -64,14 +70,19 @@ def main(argv: list[str] | None = None) -> None:
     method_cls = get(args.method)
     method = method_cls()
 
+    tag = method.config_tag()
+    out_dir = args.out_dir / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     with H5ActivationSink(
-        args.out,
+        out_dir / "scores.h5",
         runner=f"diff_{args.method}",
         dataset=f"{args.a.stem}__vs__{args.b.stem}",
         split="diff",
         capture_names=method_cls.output_capture_names,
         extra_meta={
             "method": args.method,
+            "config_tag": tag,
             "pair_a_path": str(args.a),
             "pair_b_path": str(args.b),
             "pair_capture": args.capture,
@@ -82,3 +93,5 @@ def main(argv: list[str] | None = None) -> None:
     ) as sink:
         method.fit(pair)
         method.score(pair, sink)
+
+    method.save(out_dir)

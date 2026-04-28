@@ -78,6 +78,9 @@ class PCA(DiffMethod):
             target=t.target,
         )
 
+    def config_tag(self) -> str:
+        return f"n{self.n_components}_{self.target}"
+
     def _new_ipca(self):
         from sklearn.decomposition import IncrementalPCA
         return IncrementalPCA(

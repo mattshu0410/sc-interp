@@ -30,7 +30,7 @@ def _write(path: Path, tensor: torch.Tensor, labels: dict | None = None) -> None
             ActivationRecord(
                 name=CAPTURE,
                 tensor=tensor,
-                metadata_tags={},
+                metadata_tags={"phase": "predict"},
                 per_cell=labels or {},
                 layout="BD",
             )
@@ -50,14 +50,17 @@ def synthetic_pair(tmp_path: Path) -> tuple[Path, Path]:
     return path_a, path_b
 
 
-def _compose(method: str, path_a: Path, path_b: Path, out: Path, **extra):
+def _compose(method: str, path_a: Path, path_b: Path, out_dir: Path, **extra):
     overrides = [
         f"method={method}",
         "pair=scgpt_base_vs_ft_norman",
         f"capture={CAPTURE}",
+        # Synthetic data uses capture key "layer_0" instead of the production
+        # scGPT key; tags match production (phase=predict).
+        f"capture.name={CAPTURE}",
         f"pair.a.path={path_a}",
         f"pair.b.path={path_b}",
-        f"out={out}",
+        f"out_dir={out_dir}",
     ]
     overrides.extend(f"{k}={v}" for k, v in extra.items())
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
@@ -66,11 +69,12 @@ def _compose(method: str, path_a: Path, path_b: Path, out: Path, **extra):
 
 def test_hydra_runs_activation_diff(synthetic_pair, tmp_path):
     path_a, path_b = synthetic_pair
-    out = tmp_path / "out.h5"
-    cfg = _compose("activation_diff", path_a, path_b, out)
+    out_dir = tmp_path / "out"
+    cfg = _compose("activation_diff", path_a, path_b, out_dir)
     run(cfg)
 
-    with H5ActivationReader(out) as r:
+    scores = out_dir / "default" / "scores.h5"
+    with H5ActivationReader(scores) as r:
         l2, labels = r.read("l2_per_cell")
         cosine, _ = r.read("cosine_per_cell")
         meta = r.meta
@@ -79,34 +83,53 @@ def test_hydra_runs_activation_diff(synthetic_pair, tmp_path):
     assert "cell_id" in labels
     assert meta["runner"] == "diff_activation_diff"
     assert meta["dataset"] == "scgpt_base_vs_ft_norman"
+    assert meta["config_tag"] == "default"
 
 
 def test_hydra_runs_pca(synthetic_pair, tmp_path):
     path_a, path_b = synthetic_pair
-    out = tmp_path / "out.h5"
+    out_dir = tmp_path / "out"
     cfg = _compose(
-        "pca", path_a, path_b, out,
+        "pca", path_a, path_b, out_dir,
         **{"method.training.n_components": 4, "method.training.batch_size": 64},
     )
     run(cfg)
 
-    with H5ActivationReader(out) as r:
+    scores = out_dir / "n4_b_minus_a" / "scores.h5"
+    with H5ActivationReader(scores) as r:
         pc_scores, _ = r.read("pc_scores")
         evr, _ = r.read("explained_variance_ratio")
     assert pc_scores.shape == (256, 4)
     assert evr.shape == (1, 4)
+    assert (out_dir / "n4_b_minus_a" / "pca_model.pkl").exists()
 
 
 def test_hydra_method_override(synthetic_pair, tmp_path):
     path_a, path_b = synthetic_pair
-    out = tmp_path / "out.h5"
+    out_dir = tmp_path / "out"
     cfg = _compose(
-        "pca", path_a, path_b, out,
+        "pca", path_a, path_b, out_dir,
         **{"method.training.n_components": 8, "method.training.target": "a_minus_b"},
     )
     assert cfg.method.training.n_components == 8
     assert cfg.method.training.target == "a_minus_b"
     run(cfg)
-    with H5ActivationReader(out) as r:
+    scores = out_dir / "n8_a_minus_b" / "scores.h5"
+    with H5ActivationReader(scores) as r:
         pc_scores, _ = r.read("pc_scores")
     assert pc_scores.shape == (256, 8)
+
+
+def test_config_tag_namespaces_reruns(synthetic_pair, tmp_path):
+    path_a, path_b = synthetic_pair
+    out_dir = tmp_path / "out"
+    run(_compose(
+        "pca", path_a, path_b, out_dir,
+        **{"method.training.n_components": 4, "method.training.batch_size": 64},
+    ))
+    run(_compose(
+        "pca", path_a, path_b, out_dir,
+        **{"method.training.n_components": 8, "method.training.batch_size": 64},
+    ))
+    assert (out_dir / "n4_b_minus_a" / "scores.h5").exists()
+    assert (out_dir / "n8_b_minus_a" / "scores.h5").exists()

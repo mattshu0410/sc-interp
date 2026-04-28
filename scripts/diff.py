@@ -34,17 +34,19 @@ def run(cfg: DictConfig) -> None:
     method_cls = get(cfg.method.name)
     method = method_cls.from_config(cfg.method)
 
-    out_path = Path(cfg.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tag = method.config_tag()
+    out_dir = Path(cfg.out_dir) / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     with H5ActivationSink(
-        out_path,
+        out_dir / "scores.h5",
         runner=f"diff_{cfg.method.name}",
         dataset=cfg.pair.name,
         split="diff",
         capture_names=method_cls.output_capture_names,
         extra_meta={
             "method": cfg.method.name,
+            "config_tag": tag,
             "pair_a_path": cfg.pair.a.path,
             "pair_b_path": cfg.pair.b.path,
             "pair_capture": cfg.capture.name,
@@ -56,6 +58,8 @@ def run(cfg: DictConfig) -> None:
     ) as sink:
         method.fit(pair)
         method.score(pair, sink)
+
+    method.save(out_dir)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")

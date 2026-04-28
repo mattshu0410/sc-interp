@@ -145,14 +145,18 @@ class DiffMethod(ABC):
     """Base class for diffing methods.
 
     Concrete methods set `name`, optionally flip `supports_cross_arch` /
-    `streaming_ok`, and implement `score`. `fit` defaults to no-op so
-    stateless methods don't need to override it; `save`/`load` default to
-    no-op for the same reason.
+    `streaming_ok` / `requires_preprocessing` / `requires_models`, and
+    implement `score`. `fit` / `save` / `load` / `config_tag` all default
+    to no-ops so stateless methods don't need to override them.
     """
 
     name: ClassVar[str]
     supports_cross_arch: ClassVar[bool] = False
     streaming_ok: ClassVar[bool] = True
+    # True if score() reads pre-cached h5; False if it runs models live.
+    requires_preprocessing: ClassVar[bool] = True
+    # True if score() needs live model handles (logit-lens, causal patching).
+    requires_models: ClassVar[bool] = False
     output_capture_names: ClassVar[list[str]] = []
 
     @classmethod
@@ -173,6 +177,12 @@ class DiffMethod(ABC):
     @classmethod
     def load(cls, out_dir: Path) -> "DiffMethod":
         return cls()
+
+    def config_tag(self) -> str:
+        """Leaf dir under <pair>/<method>/<capture>/ that namespaces reruns
+        with different hyperparams (e.g. `n50_b_minus_a`). Override in
+        stateful methods; default is fine for stateless ones."""
+        return "default"
 
 
 _REGISTRY: dict[str, type[DiffMethod]] = {}

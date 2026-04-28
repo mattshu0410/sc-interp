@@ -5,4 +5,4 @@ defaults:
   - _self_
 
 mode: x
-out: predictions/diff/${pair.name}/${method.name}/${capture.name}.h5
+out_dir: predictions/diff/${pair.name}/${method.name}/${capture.label}
