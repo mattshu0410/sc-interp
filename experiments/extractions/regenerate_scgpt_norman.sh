@@ -36,6 +36,7 @@ echo "==> $(date) :: finetuned -> $FT_OUT"
 "$PYTHON" -m scripts.run scgpt \
     --dataset norman --split test \
     --pretrained-dir "$PRETRAINED" \
+    --hf-repo matthewshu/scGPT-norman-ft \
     --eval-batch-size 64 \
     --capture-activations \
     --batches-per-shard 4 \
