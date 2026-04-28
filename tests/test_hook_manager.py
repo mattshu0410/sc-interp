@@ -534,15 +534,16 @@ def test_set_per_cell_populates_and_clears(
     nn_model, x = simple_lin
     sink = MemoryActivationSink()
 
+    ids = np.array([f"c{i}" for i in range(x.shape[0])], dtype=object)
     with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
-        hm.set_per_cell({"cell_id": torch.arange(x.shape[0])})
+        hm.set_per_cell({"cell_id": ids})
         hm.run(x)
         # No set_per_cell on this run — auto-clear means record.per_cell empty.
         hm.run(x)
 
     assert len(sink.records) == 2
     assert set(sink.records[0].per_cell) == {"cell_id"}
-    assert torch.equal(sink.records[0].per_cell["cell_id"], torch.arange(x.shape[0]))
+    np.testing.assert_array_equal(sink.records[0].per_cell["cell_id"], ids)
     assert sink.records[1].per_cell == {}
 
 
@@ -553,7 +554,7 @@ def test_set_per_cell_snapshot_isolated_from_caller_mutation(
     sink = MemoryActivationSink()
 
     with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
-        ids = torch.arange(x.shape[0])
+        ids = np.array([f"c{i}" for i in range(x.shape[0])], dtype=object)
         hm.set_per_cell({"cell_id": ids})
         hm.run(x)
 
@@ -565,24 +566,62 @@ def test_set_per_cell_snapshot_isolated_from_caller_mutation(
 def test_set_per_cell_accepts_mixed_tensor_and_ndarray(
     simple_lin: tuple[NNsight, torch.Tensor],
 ) -> None:
-    # A per_cell dict may mix torch tensors (numeric cell_id) and numpy
-    # arrays (string pert labels) — this is how runners make h5 files
-    # self-describing without needing a torch string dtype.
+    # A per_cell dict may mix torch tensors (numeric cell_index) and numpy
+    # arrays (string cell_id, pert labels) — this is how runners make h5
+    # files self-describing without needing a torch string dtype.
     nn_model, x = simple_lin
     sink = MemoryActivationSink()
 
+    cell_id = np.array([f"c{i}" for i in range(x.shape[0])], dtype=object)
+    cell_index = torch.arange(x.shape[0])
     pert = np.array(["ctrl"] * x.shape[0], dtype=object)
     with HookManager(nn_model, capture=[("lin", lambda m: m.output)], sink=sink) as hm:
         hm.set_per_cell({
-            "cell_id": torch.arange(x.shape[0]),
+            "cell_id": cell_id,
+            "cell_index": cell_index,
             "pert": pert,
         })
         hm.run(x)
 
     pc = sink.records[0].per_cell
-    assert set(pc) == {"cell_id", "pert"}
-    assert torch.equal(pc["cell_id"], torch.arange(x.shape[0]))
+    assert set(pc) == {"cell_id", "cell_index", "pert"}
+    np.testing.assert_array_equal(pc["cell_id"], cell_id)
+    assert torch.equal(pc["cell_index"], cell_index)
     assert list(pc["pert"]) == ["ctrl"] * x.shape[0]
+
+
+# -- Phase A.2.5: cell_id contract --------------------------------------
+
+
+def test_set_per_cell_rejects_missing_cell_id() -> None:
+    hm = HookManager(nn_model=None, capture=[], sink=None)
+    with pytest.raises(ValueError, match="set_per_cell requires a 'cell_id'"):
+        hm.set_per_cell({"pert": np.array(["ctrl"], dtype=object)})
+
+
+def test_set_per_cell_rejects_torch_int_cell_id() -> None:
+    hm = HookManager(nn_model=None, capture=[], sink=None)
+    with pytest.raises(TypeError, match="cell_id must be a string-dtype"):
+        hm.set_per_cell({"cell_id": torch.arange(3)})
+
+
+def test_set_per_cell_rejects_numpy_int_cell_id() -> None:
+    hm = HookManager(nn_model=None, capture=[], sink=None)
+    with pytest.raises(TypeError, match="cell_id must be a string-dtype"):
+        hm.set_per_cell({"cell_id": np.arange(3)})
+
+
+def test_set_per_cell_rejects_within_batch_duplicates() -> None:
+    hm = HookManager(nn_model=None, capture=[], sink=None)
+    with pytest.raises(ValueError, match="duplicates within batch"):
+        hm.set_per_cell({"cell_id": np.array(["a", "a", "b"], dtype=object)})
+
+
+def test_set_per_cell_rejects_across_batch_duplicates() -> None:
+    hm = HookManager(nn_model=None, capture=[], sink=None)
+    hm.set_per_cell({"cell_id": np.array(["a", "b"], dtype=object)})
+    with pytest.raises(ValueError, match="duplicates entries from earlier batches"):
+        hm.set_per_cell({"cell_id": np.array(["b", "c"], dtype=object)})
 
 
 # -- Phase A.3: no_grad ctor param --------------------------------------

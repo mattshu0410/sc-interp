@@ -52,6 +52,52 @@ CaptureSpec = Union[
 ]
 
 
+def validate_cell_id(
+    per_cell: dict[str, torch.Tensor | np.ndarray],
+    seen: set[str],
+) -> None:
+    """Enforce the cell_id contract on a per_cell dict.
+
+    Capture classes (HookManager, CellflowActivationCapture, future
+    framework-specific siblings) call this from their set_per_cell so the
+    contract is identical wherever activations are written. `seen` is
+    mutated in place to track ids across batches in the same run.
+
+    Contract: every batch must declare a string `cell_id` that is unique
+    within the run. Strings let diff-time tooling join activations across
+    runs (base vs FT, sweeping model conditions, cross-loader diffs) on
+    a stable per-cell key. Sequential row pointers belong in `cell_index`.
+    """
+    if "cell_id" not in per_cell:
+        raise ValueError(
+            "set_per_cell requires a 'cell_id' field — a string-dtype "
+            "np.ndarray of globally-unique-within-run identifiers (e.g. "
+            "anndata obs.index). Use 'cell_index' for sequential row pointers."
+        )
+    cid = per_cell["cell_id"]
+    if not isinstance(cid, np.ndarray) or cid.dtype != object:
+        raise TypeError(
+            f"cell_id must be a string-dtype np.ndarray (dtype=object); "
+            f"got {type(cid).__name__} with dtype="
+            f"{getattr(cid, 'dtype', '?')}. Pass np.array(barcodes, "
+            "dtype=object); sequential ints belong in 'cell_index'."
+        )
+    new_ids = set(cid.tolist())
+    if len(new_ids) != len(cid):
+        raise ValueError(
+            f"cell_id contains duplicates within batch: {len(cid)} entries, "
+            f"{len(new_ids)} unique."
+        )
+    overlap = new_ids & seen
+    if overlap:
+        sample = sorted(overlap)[:5]
+        tail = "..." if len(overlap) > 5 else ""
+        raise ValueError(
+            f"cell_id duplicates entries from earlier batches: {sample}{tail}"
+        )
+    seen |= new_ids
+
+
 class HookManager:
     def __init__(
         self,
@@ -73,6 +119,9 @@ class HookManager:
         # different cell ids, so silent reuse of stale ids would misalign
         # the h5 sidecar columns.
         self.current_per_cell: dict[str, torch.Tensor | np.ndarray] = {}
+        # Globally-unique-within-run cell identifiers seen across all
+        # set_per_cell() calls; used to enforce the cell_id contract.
+        self._seen_cell_ids: set[str] = set()
 
     def set_tag(self, key: str, value: str) -> None:
         self.current_tags[key] = value
@@ -80,6 +129,7 @@ class HookManager:
     def set_per_cell(
         self, per_cell: dict[str, torch.Tensor | np.ndarray]
     ) -> None:
+        validate_cell_id(per_cell, self._seen_cell_ids)
         self.current_per_cell = dict(per_cell)
 
     def __enter__(self) -> HookManager:

@@ -30,6 +30,10 @@ import torch
 from nnsight import NNsight
 from tqdm import tqdm
 
+# pandas 3.0 + anndata 0.9 ArrowStringArray compat — must precede gears.
+from scripts.data.gears import attach_obs_names_to_pert_data, configure_pandas_for_gears
+configure_pandas_for_gears()
+
 from gears import GEARS, PertData
 
 from scripts import wb
@@ -58,6 +62,7 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> GearsInputs:
     """Build PertData + dataloaders for a manifest whose source is 'gears'."""
     pert_data = PertData(str(REPO_ROOT / "data"), default_pert_graph=False)
     pert_data.load(data_name=manifest.raw["gears_name"])
+    attach_obs_names_to_pert_data(pert_data)
     pert_data.prepare_split(
         split=manifest.raw.get("split", {}).get("default", args.split_type),
         seed=args.seed,
@@ -273,7 +278,8 @@ def predict_with_capture(
             pert_cat.extend(batch.pert)
             bs = batch.num_graphs
             hm.set_per_cell({
-                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "cell_id": np.array(batch.obs_name, dtype=object),
+                "cell_index": torch.arange(cell_offset, cell_offset + bs),
                 "pert": np.array(batch.pert, dtype=object),
             })
             p = hm.run(batch)

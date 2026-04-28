@@ -17,9 +17,46 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 from scripts.data.splits import write_split
 from scripts.manifest import REPO_ROOT, Manifest
+
+
+def configure_pandas_for_gears() -> None:
+    """Disable pandas 3.0's ArrowStringArray default before gears imports.
+
+    gears.PertData.load() does `adata[filter_go.index.values, :]`. With
+    pandas 3.0's `future.infer_string=True` (default), `.index.values`
+    returns ArrowStringArray, which anndata 0.9 rejects in _normalize_index.
+    Set globally before gears is imported.
+    """
+    import pandas as pd
+    pd.set_option("future.infer_string", False)
+
+
+def attach_obs_names_to_pert_data(pert_data: Any) -> None:
+    """Attach the source anndata barcode to every Data in dataset_processed.
+
+    gears.PertData.create_cell_graph_dataset iterates
+    `adata[condition==pert].X` in order, emitting one Data per cell, so
+    dataset_processed[pert][i] corresponds to
+    adata[condition==pert].obs.index[i]. Setting d.obs_name here gives
+    HookManager's cell_id contract a stable cross-run identifier — the
+    anndata barcode — instead of a sequential per-run integer.
+    """
+    adata = pert_data.adata
+    for pert_category, data_list in pert_data.dataset_processed.items():
+        sub_obs = adata[adata.obs["condition"] == pert_category].obs
+        names = list(sub_obs.index)
+        if len(names) != len(data_list):
+            raise RuntimeError(
+                f"obs_name attach: pert {pert_category!r} has "
+                f"{len(names)} cells in adata but {len(data_list)} "
+                "Data items in dataset_processed"
+            )
+        for d, name in zip(data_list, names):
+            d.obs_name = str(name)
 
 
 def materialise(

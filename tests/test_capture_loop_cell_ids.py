@@ -32,6 +32,7 @@ def test_cell_ids_unique_across_batches(tmp_path: Path) -> None:
     batch_sizes = [3, 5, 2]
     total = sum(batch_sizes)
 
+    expected: list[np.ndarray] = []
     with H5ActivationSink(
         path, runner="t", dataset="t", split="t", capture_names=["lin"]
     ) as sink, HookManager(
@@ -39,14 +40,22 @@ def test_cell_ids_unique_across_batches(tmp_path: Path) -> None:
     ) as hm:
         cell_offset = 0
         for bs in batch_sizes:
-            hm.set_per_cell({
-                "cell_id": torch.arange(cell_offset, cell_offset + bs),
-            })
+            ids = np.array(
+                [f"c{i}" for i in range(cell_offset, cell_offset + bs)],
+                dtype=object,
+            )
+            expected.append(ids)
+            hm.set_per_cell({"cell_id": ids})
             hm.run(torch.randn(bs, 4))
             cell_offset += bs
 
     with h5py.File(path, "r") as f:
-        cell_ids = f["lin/labels/cell_id"][...]
+        raw = f["lin/labels/cell_id"][...]
+    # h5py returns variable-length strings as bytes (or str depending on
+    # version); decode for comparison.
+    cell_ids = np.array(
+        [x.decode() if isinstance(x, bytes) else x for x in raw], dtype=object
+    )
     assert cell_ids.shape == (total,)
-    assert np.array_equal(cell_ids, np.arange(total))
-    assert len(set(cell_ids)) == total
+    np.testing.assert_array_equal(cell_ids, np.concatenate(expected))
+    assert len(set(cell_ids.tolist())) == total

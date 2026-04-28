@@ -35,6 +35,11 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
+
+# pandas 3.0 + anndata 0.9 ArrowStringArray compat — must precede gears.
+from scripts.data.gears import attach_obs_names_to_pert_data, configure_pandas_for_gears
+configure_pandas_for_gears()
+
 from gears import PertData
 from nnsight import NNsight
 from tqdm import tqdm
@@ -116,6 +121,7 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     pert_data = PertData(str(REPO_ROOT / "data"), default_pert_graph=False)
     pert_data.load(data_name=manifest.raw["gears_name"])
     _ensure_legacy_x_layout(pert_data)
+    attach_obs_names_to_pert_data(pert_data)
     pert_data.prepare_split(
         split=manifest.raw.get("split", {}).get("default", args.split_type),
         seed=args.seed,
@@ -648,7 +654,8 @@ def predict_with_capture(
             # cells in one batch share the same window. .expand is a view;
             # the sink materializes to numpy, so no mem blowup before then.
             hm.set_per_cell({
-                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "cell_id": np.array(batch.obs_name, dtype=object),
+                "cell_index": torch.arange(cell_offset, cell_offset + bs),
                 "pert": np.array(batch.pert, dtype=object),
                 "gene_dataset_ids": fa.input_gene_ids.unsqueeze(0).expand(bs, -1).contiguous().cpu(),
             })

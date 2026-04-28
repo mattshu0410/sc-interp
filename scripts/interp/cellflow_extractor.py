@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 
-from scripts.interp.hooks import ActivationRecord
+from scripts.interp.hooks import ActivationRecord, validate_cell_id
 
 
 class CellflowActivationCapture:
@@ -35,6 +35,9 @@ class CellflowActivationCapture:
         # Cleared after every run(): cell ids differ per batch, silent reuse
         # of stale ids across batches would misalign h5 sidecars.
         self.current_per_cell: dict[str, torch.Tensor | np.ndarray] = {}
+        # Globally-unique-within-run cell identifiers; used by
+        # validate_cell_id to detect cross-batch duplicates.
+        self._seen_cell_ids: set[str] = set()
 
     def set_tag(self, key: str, value: str) -> None:
         self.current_tags[key] = value
@@ -42,6 +45,7 @@ class CellflowActivationCapture:
     def set_per_cell(
         self, per_cell: dict[str, torch.Tensor | np.ndarray]
     ) -> None:
+        validate_cell_id(per_cell, self._seen_cell_ids)
         self.current_per_cell = dict(per_cell)
 
     def __enter__(self) -> CellflowActivationCapture:

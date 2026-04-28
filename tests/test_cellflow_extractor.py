@@ -86,8 +86,12 @@ def test_capture_faithful_fixed_t(vf_and_params):
     enc_noise = jnp.zeros((1, 8))
 
     # Manually replay each (batch, t) to get ground-truth sow values.
-    for batch_x in (x1, x2):
-        cap.set_per_cell({"cell_id": torch.arange(batch_x.shape[0])})
+    for batch_idx, batch_x in enumerate((x1, x2)):
+        ids = np.array(
+            [f"b{batch_idx}c{i}" for i in range(batch_x.shape[0])],
+            dtype=object,
+        )
+        cap.set_per_cell({"cell_id": ids})
         cap.run(batch_x, cond, enc_noise)
 
     # Total record count = n_batches * n_timesteps * n_names
@@ -142,7 +146,8 @@ def test_per_cell_cleared_between_runs(vf_and_params):
     cond = {"c": jnp.zeros((1, 5))}
     enc_noise = jnp.zeros((1, 8))
 
-    cap.set_per_cell({"cell_id": torch.arange(3)})
+    ids = np.array(["c0", "c1", "c2"], dtype=object)
+    cap.set_per_cell({"cell_id": ids})
     cap.run(x, cond, enc_noise)
 
     # All records from run #1 share the same cell_id (per-run snapshot, not
@@ -150,7 +155,7 @@ def test_per_cell_cleared_between_runs(vf_and_params):
     first_run = sink.records[:2]
     assert len(first_run) == 2
     for rec in first_run:
-        assert torch.equal(rec.per_cell["cell_id"], torch.arange(3))
+        np.testing.assert_array_equal(rec.per_cell["cell_id"], ids)
 
     # Run again without setting per_cell — should be empty, not stale.
     cap.run(x, cond, enc_noise)
