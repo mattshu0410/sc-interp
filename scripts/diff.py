@@ -1,10 +1,10 @@
 """Hydra entry point for diffing.
 
 Run:
-    python scripts/diff.py method=pca pair=scgpt_base_vs_ft_norman capture=layer_11
+    python -m scripts.diff method=pca pair=scgpt_base_vs_ft_norman capture=layer_11
 
 Sweep:
-    python scripts/diff.py -m method=pca,activation_diff capture=layer_0,layer_11
+    python -m scripts.diff -m method=pca,activation_diff capture=layer_0,layer_11
 """
 
 from __future__ import annotations
