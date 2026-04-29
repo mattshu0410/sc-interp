@@ -35,11 +35,18 @@ Relationship = Literal[
 
 @dataclass(frozen=True)
 class ActivationSource:
-    """Lazy handle to cached activations. No tensors loaded until read."""
+    """Lazy handle to cached activations. No tensors loaded until read.
+
+    `max_rows` caps iteration at the first N rows in shard order. Set by
+    `load_pair` when truncating the longer side to match the shorter,
+    after verifying that the prefix `cell_id`s agree element-wise. Tests
+    and direct-construction callers leave it None.
+    """
 
     path: Path
     capture: str
     tags: dict[str, str] = field(default_factory=dict)
+    max_rows: int | None = None
 
     def iter_chunks(
         self, chunk_rows: int
@@ -49,16 +56,23 @@ class ActivationSource:
         Chunks never span shard boundaries — a single shard read is the
         upper bound on concatenation cost per yield. Labels are returned
         as numpy (even non-string) to dodge torch's missing string dtype;
-        callers convert if they need tensors.
+        callers convert if they need tensors. When `max_rows` is set,
+        iteration stops once that many rows have been yielded.
         """
         act_path = f"{group_path(self.capture, self.tags)}/activation"
         labels_path = f"{group_path(self.capture, self.tags)}/labels"
+        emitted = 0
         for shard_file in _shard_files(self.path):
             with h5py.File(shard_file, "r") as f:
                 if act_path not in f:
                     continue
                 dset = f[act_path]
                 n = dset.shape[0]
+                if self.max_rows is not None:
+                    remaining = self.max_rows - emitted
+                    if remaining <= 0:
+                        return
+                    n = min(n, remaining)
                 label_names = (
                     list(f[labels_path].keys()) if labels_path in f else []
                 )
@@ -78,6 +92,7 @@ class ActivationSource:
                             )
                         labels[lname] = arr
                     yield act, labels
+                    emitted += stop - start
 
     def load_all(self) -> tuple[torch.Tensor, dict[str, np.ndarray]]:
         """Concatenate all chunks into a single in-memory tensor. Use only
@@ -105,6 +120,8 @@ class ActivationSource:
             with h5py.File(shard_file, "r") as f:
                 if act_path in f:
                     total += f[act_path].shape[0]
+        if self.max_rows is not None:
+            return min(total, self.max_rows)
         return total
 
     def feature_shape(self) -> tuple[int, ...]:
