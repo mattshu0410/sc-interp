@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.interp.hook_sinks import H5ActivationSink, group_path
+from scripts.interp.hook_sinks import H5ActivationSink, RunningStats, group_path
 from scripts.interp.hooks import Layout  # re-exported for callers
 
 
@@ -23,6 +23,8 @@ class H5ActivationReader:
         # Reader logic always iterates _files, so single-file is just the
         # degenerate shard case — no branchy code paths.
         self._files: list[h5py.File] = []
+        # Folder-mode sibling stats file; None when absent or single-file.
+        self._stats_file: h5py.File | None = None
 
     def __enter__(self) -> H5ActivationReader:
         if self.path.is_dir():
@@ -33,6 +35,9 @@ class H5ActivationReader:
                     f"{H5ActivationSink._SHARD_GLOB} files"
                 )
             self._files = [h5py.File(p, "r") for p in shard_paths]
+            stats_path = self.path / H5ActivationSink.STATS_FILE_NAME
+            if stats_path.exists():
+                self._stats_file = h5py.File(stats_path, "r")
         else:
             self._files = [h5py.File(self.path, "r")]
         self._validate_shards()
@@ -70,6 +75,9 @@ class H5ActivationReader:
         for f in self._files:
             f.close()
         self._files = []
+        if self._stats_file is not None:
+            self._stats_file.close()
+            self._stats_file = None
 
     @property
     def meta(self) -> dict[str, Any]:
@@ -108,6 +116,29 @@ class H5ActivationReader:
                     attr = attr.decode()
                 return str(attr)  # type: ignore[return-value]
         raise KeyError(f"no activation at {act_path}")
+
+    def running_stats(
+        self, name: str, tags: dict[str, str] | None = None
+    ) -> RunningStats | None:
+        """Welford stats for one (capture, tags) group.
+
+        Folder mode reads `<folder>/stats.h5`; single-file mode reads from
+        the activation file. Returns None if the sidecar is absent (e.g.
+        captures written by older code; run scripts.interp.backfill_running_stats
+        to retrofit).
+        """
+        self._require_open()
+        gpath = group_path(name, tags or {})
+        stats_path = f"{gpath}/running_stats"
+        source = self._stats_file if self._stats_file is not None else self._files[0]
+        if stats_path not in source:
+            return None
+        grp = source[stats_path]
+        return RunningStats(
+            count=int(grp["count"][()]),
+            mean=torch.from_numpy(np.asarray(grp["mean"][...])),
+            M2=torch.from_numpy(np.asarray(grp["M2"][...])),
+        )
 
     def read(
         self, name: str, tags: dict[str, str] | None = None

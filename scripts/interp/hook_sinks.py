@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,114 @@ import numpy as np
 import torch
 
 from scripts.interp.hooks import ActivationRecord
+
+
+@dataclass(frozen=True)
+class RunningStats:
+    """Welford accumulator state for one (capture, tags) group.
+
+    M2 is sum of squared deviations from the mean. Mean and M2 are stored
+    at whatever floating-point dtype the source activations carried — no
+    silent promotion.
+    """
+
+    count: int
+    mean: torch.Tensor
+    M2: torch.Tensor
+
+    def std(self, unbiased: bool = False) -> torch.Tensor:
+        denom = self.count - (1 if unbiased else 0)
+        if denom <= 0:
+            return torch.zeros_like(self.M2)
+        return (self.M2 / denom).sqrt()
+
+    @classmethod
+    def merge(cls, a: "RunningStats", b: "RunningStats") -> "RunningStats":
+        # Chan's parallel Welford merge.
+        if a.count == 0:
+            return b
+        if b.count == 0:
+            return a
+        n = a.count + b.count
+        delta = b.mean - a.mean
+        mean = a.mean + delta * (b.count / n)
+        M2 = a.M2 + b.M2 + delta.pow(2) * (a.count * b.count / n)
+        return cls(count=n, mean=mean, M2=M2)
+
+
+class _RunningStatWelford:
+    """Mutable per-write accumulator; sink snapshots it at flush time.
+
+    Accumulator dtype matches the first batch's float dtype. Integer
+    activations get promoted to float32 since fractional means need a
+    floating-point representation.
+    """
+
+    __slots__ = ("count", "mean", "M2", "_feature_shape", "_dtype")
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.mean: torch.Tensor | None = None
+        self.M2: torch.Tensor | None = None
+        self._feature_shape: tuple[int, ...] | None = None
+        self._dtype: torch.dtype | None = None
+
+    def update(self, x: torch.Tensor) -> None:
+        if x.numel() == 0:
+            return
+        x = x.detach().cpu()
+        if not x.dtype.is_floating_point:
+            x = x.to(torch.float32)
+
+        if self._dtype is None:
+            self._dtype = x.dtype
+        elif x.dtype != self._dtype:
+            x = x.to(self._dtype)
+
+        batch_size = x.shape[0]
+        if self._feature_shape is None:
+            self._feature_shape = tuple(x.shape[1:])
+        elif tuple(x.shape[1:]) != self._feature_shape:
+            raise ValueError(
+                f"running_stats: feature shape changed mid-stream from "
+                f"{self._feature_shape} to {tuple(x.shape[1:])}"
+            )
+
+        if batch_size == 1:
+            # Within-batch variance is 0; avoid NaN from var() on length-1.
+            batch_mean = x[0]
+            batch_M2 = torch.zeros_like(batch_mean)
+        else:
+            batch_mean = x.mean(dim=0)
+            batch_M2 = (x - batch_mean).pow(2).sum(dim=0)
+
+        if self.count == 0:
+            self.mean = batch_mean.clone()
+            self.M2 = batch_M2.clone()
+            self.count = batch_size
+            return
+
+        n = self.count + batch_size
+        delta = batch_mean - self.mean
+        self.mean = self.mean + delta * (batch_size / n)
+        self.M2 = self.M2 + batch_M2 + delta.pow(2) * (self.count * batch_size / n)
+        self.count = n
+
+    def snapshot(self) -> RunningStats | None:
+        if self.count == 0 or self.mean is None or self.M2 is None:
+            return None
+        return RunningStats(
+            count=int(self.count),
+            mean=self.mean.clone(),
+            M2=self.M2.clone(),
+        )
+
+    def reset(self) -> None:
+        self.count = 0
+        self.mean = None
+        self.M2 = None
+        self._feature_shape = None
+        self._dtype = None
 
 
 def default_activation_out(
@@ -73,8 +182,14 @@ class H5ActivationSink:
     # v3: per-cell labels may be np.ndarray (incl. object/string), and
     # extra_meta values may be non-string (arrays, ints) — e.g., gene_symbols
     # or num_genes. Readers can branch on this to parse string labels.
+    # `running_stats/{count, mean, M2}` is an optional, backwards-compatible
+    # sidecar under each `<capture>/<tags>/` group. Welford accumulators
+    # populated at write time so training-time normalisation can skip the
+    # streaming pass. Older shards lacking the group fall through to a
+    # streaming computation downstream — additive change, no version bump.
     SCHEMA_VERSION = "3"
     REQUIRED_META_FIELDS = ("runner", "dataset", "split", "capture_names")
+    STATS_FILE_NAME = "stats.h5"
 
     # When a caller passes `batches_per_shard`, shards are written to a
     # folder with this name format. Zero-padding width chosen for
@@ -96,6 +211,7 @@ class H5ActivationSink:
         compression_opts: int = 4,
         mode: str = "x",
         batches_per_shard: int | None = None,
+        compute_running_stats: bool = True,
     ) -> None:
         if not capture_names:
             raise ValueError("capture_names must be a non-empty list")
@@ -121,6 +237,13 @@ class H5ActivationSink:
         # shard-NNNNN.h5 files rotated every N `batch_end()` calls. None
         # preserves the single-file layout.
         self.batches_per_shard = batches_per_shard
+        self.compute_running_stats = compute_running_stats
+        # One global accumulator per (capture, tags) — kept across shard
+        # rotations; flushed once at close. Folder mode → `<folder>/stats.h5`,
+        # single-file mode → in the file under the activation's group.
+        self._running_stats: dict[
+            tuple[str, tuple[tuple[str, str], ...]], _RunningStatWelford
+        ] = {}
         self._file: h5py.File | None = None
         self._closed = False
         self._shard_index = 0
@@ -279,6 +402,44 @@ class H5ActivationSink:
                     label_path, data=label_arr, **create_kwargs
                 )
 
+        if self.compute_running_stats:
+            key = (record.name, tuple(sorted(record.metadata_tags.items())))
+            acc = self._running_stats.setdefault(key, _RunningStatWelford())
+            acc.update(record.tensor)
+
+    def _write_running_stats_to(self, f: h5py.File) -> None:
+        # Idempotent dump of current accumulator snapshots into `f`.
+        for (name, tags_tuple), acc in self._running_stats.items():
+            snap = acc.snapshot()
+            if snap is None:
+                continue
+            tags = dict(tags_tuple)
+            stats_grp = f.require_group(f"{group_path(name, tags)}/running_stats")
+            for ds_name, value in (
+                ("count", np.int64(snap.count)),
+                ("mean", snap.mean.numpy()),
+                ("M2", snap.M2.numpy()),
+            ):
+                if ds_name in stats_grp:
+                    del stats_grp[ds_name]
+                stats_grp.create_dataset(ds_name, data=value)
+
+    def _persist_running_stats(self) -> None:
+        # Folder mode: refresh `<folder>/stats.h5` with the cumulative stats
+        # so far. Single-file mode: write stats into the already-open file.
+        # Mirrors upstream's save_state-after-each-shard pattern so a
+        # mid-extraction crash leaves stats consistent with what's on disk.
+        if not self.compute_running_stats or not self._running_stats:
+            return
+        if self.batches_per_shard is None:
+            if self._file is None:
+                return
+            self._write_running_stats_to(self._file)
+        else:
+            stats_path = self.path / self.STATS_FILE_NAME
+            with h5py.File(stats_path, "w") as f:
+                self._write_running_stats_to(f)
+
     def batch_end(self) -> None:
         # Called by extractors after each run(). Single-file mode: no-op
         # (keeps the caller branch-free). Shard mode: count batches, rotate
@@ -298,6 +459,7 @@ class H5ActivationSink:
                 self._file = None
             self._shard_index += 1
             self._batches_in_shard = 0
+            self._persist_running_stats()
 
     def _ensure_file_open(self) -> h5py.File:
         # Hit by write() after a rotation — the next write lives in the next
@@ -311,9 +473,20 @@ class H5ActivationSink:
     def close(self) -> None:
         if self._closed:
             return
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        if self.batches_per_shard is None:
+            # Single-file: stats live inside the file; flush before close.
+            if self._file is not None:
+                self._persist_running_stats()
+                self._file.close()
+                self._file = None
+        else:
+            # Folder: stats.h5 is independent of the active shard. Close
+            # any open shard first, then write the final stats covering
+            # batches since the last rotation.
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+            self._persist_running_stats()
         self._closed = True
 
     def __exit__(self, *exc: object) -> None:
