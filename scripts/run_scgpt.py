@@ -47,6 +47,7 @@ from tqdm import tqdm
 
 from scgpt.loss import masked_mse_loss
 from scgpt.model import TransformerGenerator
+from scgpt.model.gene_priors import GenePriorEncoder
 from scgpt.model.generation_model import map_raw_id_to_vocab_id
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.utils import compute_perturbation_metrics, set_seed
@@ -75,11 +76,16 @@ DEFAULT_PRETRAINED = CKPT_ROOT / "scGPT_human"
 
 @dataclass
 class ScgptInputs:
-    """Everything finetune/predict need from the dataset loader."""
-    pert_data: PertData
+    """Everything finetune/predict need from the dataset loader.
+
+    Source-neutral: each loader (gears, state_replogle, …) is responsible
+    for producing pyg-compatible DataLoaders and the control-cell subset.
+    The runner does not touch any source-specific object (PertData, etc.).
+    """
     train_loader: Iterable
     val_loader: Iterable
     test_loader: Iterable
+    ctrl_adata: ad.AnnData
     var: pd.DataFrame
 
 
@@ -130,11 +136,16 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     pert_data.get_dataloader(
         batch_size=args.batch_size, test_batch_size=args.eval_batch_size
     )
+    pert_col = manifest.obs.pert_col
+    control_label = manifest.obs.control_label
+    ctrl_adata = pert_data.adata[
+        pert_data.adata.obs[pert_col] == control_label
+    ].copy()
     return ScgptInputs(
-        pert_data=pert_data,
         train_loader=pert_data.dataloader["train_loader"],
         val_loader=pert_data.dataloader["val_loader"],
         test_loader=pert_data.dataloader["test_loader"],
+        ctrl_adata=ctrl_adata,
         var=pert_data.adata.var.copy(),
     )
 
@@ -176,7 +187,11 @@ def build_gene_ids(var: pd.DataFrame, vocab: GeneVocab) -> np.ndarray:
     return gene_ids
 
 
-def build_model(margs: dict, vocab: GeneVocab) -> TransformerGenerator:
+def build_model(
+    margs: dict,
+    vocab: GeneVocab,
+    gene_prior: GenePriorEncoder | None = None,
+) -> TransformerGenerator:
     return TransformerGenerator(
         ntoken=len(vocab),
         d_model=margs["embsize"],
@@ -191,6 +206,7 @@ def build_model(margs: dict, vocab: GeneVocab) -> TransformerGenerator:
         pad_value=margs.get("pad_value", 0),
         pert_pad_id=margs.get("pert_pad_id", 2),
         use_fast_transformer=False,
+        gene_prior=gene_prior,
     )
 
 
@@ -333,7 +349,7 @@ def forward_pass(
 def evaluate_val(
     model: TransformerGenerator,
     loader: Iterable,
-    pert_data: PertData,
+    ctrl_adata: ad.AnnData,
     gene_ids: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
@@ -356,7 +372,6 @@ def evaluate_val(
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
-    ctrl_adata = pert_data.adata[pert_data.adata.obs["condition"] == "ctrl"]
     return compute_perturbation_metrics(results, ctrl_adata)
 
 
@@ -426,7 +441,7 @@ def finetune(
         metrics = evaluate_val(
             model,
             inputs.val_loader,
-            inputs.pert_data,
+            inputs.ctrl_adata,
             gene_ids,
             include_zero_gene,
             device,
@@ -490,9 +505,13 @@ def finetune(
     return model, stats
 
 
-def finetune_cache_dir(dataset: str) -> Path:
-    """Per-dataset cache directory under models/scgpt/checkpoints/."""
-    return CKPT_ROOT / f"{dataset}_ft"
+def finetune_cache_dir(dataset: str, *, variant: str = "base") -> Path:
+    """Per-(dataset, variant) cache directory under models/scgpt/checkpoints/.
+
+    `variant` discriminates architectural changes that would otherwise
+    silently reuse the wrong cache (e.g. base vs gene-prior-augmented).
+    """
+    return CKPT_ROOT / f"{dataset}_{variant}_ft"
 
 
 def maybe_finetune(
@@ -504,7 +523,8 @@ def maybe_finetune(
     args: argparse.Namespace,
 ) -> tuple[TransformerGenerator, TrainStats]:
     """Resolve the fine-tuned weights via cache_or_train, mutating model in place."""
-    cache_dir = finetune_cache_dir(dataset)
+    variant = "esm" if model.gene_prior is not None else "base"
+    cache_dir = finetune_cache_dir(dataset, variant=variant)
 
     def _load(cache: Path) -> TransformerGenerator:
         load_finetuned_weights(model, cache / "best_model.pt", device)
@@ -773,6 +793,12 @@ def _add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-seq-len", type=int, default=1536)
     p.add_argument("--skip-finetune", action="store_true")
     p.add_argument("--limit-num-batches", type=int, default=None)
+    p.add_argument(
+        "--gene-prior-path",
+        type=Path,
+        default=None,
+        help="safetensors with [vocab, prior_dim] frozen per-gene prior table",
+    )
 
 
 def _train_or_load(
@@ -787,7 +813,13 @@ def _train_or_load(
     with open(args.pretrained_dir / "args.json") as f:
         margs = json.load(f)
     gene_ids = build_gene_ids(inputs.var, vocab)
-    model = build_model(margs, vocab).to(device)
+    gene_prior = None
+    if args.gene_prior_path is not None:
+        gene_prior = GenePriorEncoder.from_safetensors(
+            args.gene_prior_path, d_model=margs["embsize"]
+        )
+        print(f"==> loaded gene prior from {args.gene_prior_path}")
+    model = build_model(margs, vocab, gene_prior=gene_prior).to(device)
     load_pretrained_weights(model, args.pretrained_dir / "best_model.pt", device)
 
     if args.skip_finetune:
@@ -857,11 +889,7 @@ def _save_predictions(
     output: Path,
 ) -> None:
     """Invoke the module-level save_predictions with resolved manifest fields."""
-    pert_col = manifest.obs.pert_col
-    control_label = manifest.obs.control_label
-    ctrl_adata = inputs.pert_data.adata[
-        inputs.pert_data.adata.obs[pert_col] == control_label
-    ]
+    ctrl_adata = inputs.ctrl_adata
     save_predictions(
         results,
         inputs.var,
