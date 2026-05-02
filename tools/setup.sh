@@ -32,7 +32,8 @@ uv pip install \
 uv pip install cell-eval
 
 # HuggingFace Hub for dataset/model uploads and downloads.
-uv pip install huggingface_hub
+# safetensors is needed by data/build_scgpt_esm_prior.sh.
+uv pip install huggingface_hub safetensors
 
 # pytest for scripts/diffing/ and other tools tests.
 uv pip install pytest

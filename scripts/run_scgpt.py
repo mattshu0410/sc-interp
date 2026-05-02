@@ -907,7 +907,6 @@ def _save_predictions(
     output: Path,
 ) -> None:
     """Invoke the module-level save_predictions with resolved manifest fields."""
-    ctrl_adata = inputs.ctrl_adata
     save_predictions(
         results,
         inputs.var,
@@ -915,9 +914,9 @@ def _save_predictions(
         args.dataset,
         args.split,
         stats,
-        ctrl_adata,
-        pert_col,
-        control_label,
+        inputs.ctrl_adata,
+        manifest.obs.pert_col,
+        manifest.obs.control_label,
     )
 
 
