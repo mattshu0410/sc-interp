@@ -39,6 +39,7 @@ import torch
 
 # pandas 3.0 + anndata 0.9 ArrowStringArray compat — must precede gears.
 from scripts.data.gears import attach_obs_names_to_pert_data, configure_pandas_for_gears
+from scripts.data.state_replogle import load_state_replogle
 configure_pandas_for_gears()
 
 from gears import PertData
@@ -150,8 +151,25 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     )
 
 
+def _load_state_replogle(
+    manifest: Manifest, args: argparse.Namespace
+) -> ScgptInputs:
+    """Build pyg DataLoaders from State-Replogle-Filtered for cross-cell-line eval."""
+    train_loader, val_loader, test_loader, ctrl_adata, var = load_state_replogle(
+        manifest, args
+    )
+    return ScgptInputs(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        ctrl_adata=ctrl_adata,
+        var=var,
+    )
+
+
 LOADERS: dict[str, Callable[[Manifest, argparse.Namespace], ScgptInputs]] = {
     "gears": _load_gears,
+    "state_replogle": _load_state_replogle,
 }
 
 
