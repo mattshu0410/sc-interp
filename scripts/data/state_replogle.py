@@ -92,10 +92,12 @@ class _CellGraphDataset(Dataset):
         X: np.ndarray,
         pairs: list[_Pair],
         gene_to_idx: dict[str, int],
+        obs_names: np.ndarray,
     ) -> None:
         self.X = X
         self.pairs = pairs
         self.gene_to_idx = gene_to_idx
+        self.obs_names = obs_names
         self.n_genes = X.shape[1]
 
     def __len__(self) -> int:
@@ -118,7 +120,7 @@ class _CellGraphDataset(Dataset):
             label = f"{p.pert_label}+ctrl"
         x = torch.from_numpy(np.stack([x_expr.astype(np.float32), flag], axis=1))
         y = torch.from_numpy(y_expr.astype(np.float32)).unsqueeze(0)
-        return Data(x=x, y=y, pert=label)
+        return Data(x=x, y=y, pert=label, obs_name=str(self.obs_names[p.perturbed_row]))
 
 
 def _resolve_split(manifest: Manifest, args: argparse.Namespace) -> dict:
@@ -203,7 +205,11 @@ def make_sample_loader(
     print(f"==> sample pairs: {len(pairs):,}")
 
     gene_to_idx = {g: i for i, g in enumerate(adata.var.index.astype(str))}
-    ds = _CellGraphDataset(X, pairs, gene_to_idx)
+    # obs.index encodes cell-barcode + gem-group + cell-line (e.g.
+    # 'AAACCCAAGAATAGTC-3-hepg2'), so it's globally unique and the right
+    # cell_id for HookManager's per-cell metadata.
+    obs_names = adata.obs.index.values.astype(str)
+    ds = _CellGraphDataset(X, pairs, gene_to_idx, obs_names)
     return DataLoader(ds, batch_size=batch_size, shuffle=False)
 
 
@@ -318,9 +324,11 @@ def load_state_replogle(
     )
 
     gene_to_idx = {g: i for i, g in enumerate(adata.var.index.astype(str))}
-    train_ds = _CellGraphDataset(X, train_pairs, gene_to_idx)
-    val_ds = _CellGraphDataset(X, val_pairs, gene_to_idx)
-    test_ds = _CellGraphDataset(X, test_pairs, gene_to_idx)
+    # See make_sample_loader for why obs.index is the cell_id here.
+    obs_names = adata.obs.index.values.astype(str)
+    train_ds = _CellGraphDataset(X, train_pairs, gene_to_idx, obs_names)
+    val_ds = _CellGraphDataset(X, val_pairs, gene_to_idx, obs_names)
+    test_ds = _CellGraphDataset(X, test_pairs, gene_to_idx, obs_names)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.eval_batch_size, shuffle=False)
