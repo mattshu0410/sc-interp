@@ -88,8 +88,7 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
     p.add_argument(
         "--capture-layers",
         default="all",
-        help="comma-separated capture point names (or transformer-layer "
-        "indices as shorthand); 'all' captures every wired point",
+        help="comma-separated exact capture point names; 'all' captures every wired point",
     )
     wb.add_args(p)
     return p
