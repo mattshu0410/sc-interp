@@ -629,6 +629,7 @@ def predict_with_capture(
     split: str,
     batches_per_shard: int | None = None,
     limit_num_batches: int | None = None,
+    capture_layers: str = "all",
 ) -> dict:
     """predict() variant that captures per-layer hidden states via HookManager.
 
@@ -650,6 +651,16 @@ def predict_with_capture(
            "BTD")
           for i in range(len(model.transformer_encoder.layers))],
     ]
+    if capture_layers != "all":
+        requested = {s.strip() for s in capture_layers.split(",") if s.strip()}
+        valid = {name for name, *_ in targets}
+        unknown = sorted(requested - valid)
+        if unknown:
+            raise ValueError(
+                f"unknown capture layer(s) {unknown}; valid: {sorted(valid)}"
+            )
+        targets = [t for t in targets if t[0] in requested]
+        print(f"==> capturing {len(targets)} layer(s): {[t[0] for t in targets]}")
     # Force the dense forward path on the transformer encoder. With
     # src_key_padding_mask set and no flash_attn available, nn.TransformerEncoder
     # packs the batch into a NestedTensor between layers and only unpacks at
@@ -903,6 +914,7 @@ def _predict(
         args.split,
         batches_per_shard=args.batches_per_shard,
         limit_num_batches=args.limit_num_batches,
+        capture_layers=args.capture_layers,
     )
 
 

@@ -85,5 +85,11 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
         "rotates into shard-NNNNN.h5 files every N batches; default is a "
         "single .h5 file",
     )
+    p.add_argument(
+        "--capture-layers",
+        default="all",
+        help="comma-separated capture point names (or transformer-layer "
+        "indices as shorthand); 'all' captures every wired point",
+    )
     wb.add_args(p)
     return p
