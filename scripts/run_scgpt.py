@@ -593,6 +593,7 @@ def predict(
 ) -> dict:
     model.eval()
     pert_cat: list[str] = []
+    cell_ids: list[str] = []
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
@@ -601,6 +602,7 @@ def predict(
     for batch in tqdm(it, total=total, desc="scgpt predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
+        cell_ids.extend(batch.obs_name)
         p = model.pred_perturb(
             batch, include_zero_gene=include_zero_gene, gene_ids=gene_ids
         )
@@ -609,6 +611,7 @@ def predict(
 
     return {
         "pert": np.array(pert_cat),
+        "cell_id": np.array(cell_ids, dtype=object),
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
@@ -674,6 +677,7 @@ def predict_with_capture(
     nn_model = NNsight(model)
 
     pert_cat: list[str] = []
+    cell_ids: list[str] = []
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
@@ -732,10 +736,12 @@ def predict_with_capture(
             pred_full = scatter_back(output_values, fa.input_gene_ids, fa.n_genes)
             preds.extend(pred_full.cpu())
             truths.extend(batch.y.cpu())
+            cell_ids.extend(batch.obs_name)
             cell_offset += bs
 
     return {
         "pert": np.array(pert_cat),
+        "cell_id": np.array(cell_ids, dtype=object),
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
@@ -764,16 +770,33 @@ def save_predictions(
     """
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    ctrl_X = ctrl_adata.X.toarray() if hasattr(ctrl_adata.X, "toarray") else np.asarray(ctrl_adata.X)
-    pred_X = np.vstack([results["pred"], ctrl_X])
-    truth_X = np.vstack([results["truth"], ctrl_X])
-    labels = np.concatenate(
-        [results["pert"], np.array([control_label] * ctrl_adata.n_obs)]
-    )
+    # Sample mode already balance-samples controls into the loader output
+    # via the (cell_line, non-targeting) buckets, so re-appending the full
+    # ctrl_adata pool would duplicate those cells in the h5ad. Skip the
+    # append for sample; keep it for train/val/test where it gives Cell-Eval
+    # the full basal reference distribution.
+    if split == "sample":
+        pred_X = results["pred"]
+        truth_X = results["truth"]
+        labels = results["pert"]
+        cell_ids = results["cell_id"]
+        n_ctrl_appended = 0
+    else:
+        ctrl_X = ctrl_adata.X.toarray() if hasattr(ctrl_adata.X, "toarray") else np.asarray(ctrl_adata.X)
+        pred_X = np.vstack([results["pred"], ctrl_X])
+        truth_X = np.vstack([results["truth"], ctrl_X])
+        labels = np.concatenate(
+            [results["pert"], np.array([control_label] * ctrl_adata.n_obs)]
+        )
+        cell_ids = np.concatenate(
+            [results["cell_id"], ctrl_adata.obs.index.values.astype(object)]
+        )
+        n_ctrl_appended = ctrl_adata.n_obs
 
+    obs = pd.DataFrame({pert_col: labels}, index=pd.Index(cell_ids, name="cell_id"))
     adata = ad.AnnData(
         X=pred_X,
-        obs=pd.DataFrame({pert_col: labels}),
+        obs=obs,
         var=var.copy(),
         layers={"truth": truth_X},
     )
@@ -784,7 +807,7 @@ def save_predictions(
     adata.uns["control_label"] = control_label
     adata.uns["train_stats"] = train_stats.__dict__
     adata.write_h5ad(output)
-    print(f"==> wrote {adata.shape} to {output} ({ctrl_adata.n_obs} control cells included)")
+    print(f"==> wrote {adata.shape} to {output} ({n_ctrl_appended} control cells appended)")
 
 
 # ── Runner spec ───────────────────────────────────────────────────────────────
