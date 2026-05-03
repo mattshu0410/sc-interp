@@ -134,6 +134,79 @@ def _resolve_split(manifest: Manifest, args: argparse.Namespace) -> dict:
     }
 
 
+def _pairs_from_indices(
+    indices: np.ndarray,
+    pert_arr: np.ndarray,
+    cell_line_arr: np.ndarray,
+    *,
+    control_label: str,
+    ctrl_indices_per_line: dict[str, np.ndarray],
+    rng: np.random.Generator,
+) -> list[_Pair]:
+    """Emit one Pair per row in `indices`.
+
+    Perturbed cells get a random basal from their cell line's full control
+    pool. Control cells are emitted self-paired. Used by make_sample_loader;
+    `_build_pairs` is the train/val/test analog that filters by perturbation
+    set instead of taking explicit row indices.
+    """
+    pairs: list[_Pair] = []
+    for row in indices:
+        label = str(pert_arr[row])
+        if label == control_label:
+            pairs.append(_Pair(int(row), int(row), "ctrl", True))
+        else:
+            line = str(cell_line_arr[row])
+            pool = ctrl_indices_per_line[line]
+            basal = int(rng.choice(pool))
+            pairs.append(_Pair(int(row), basal, label, False))
+    return pairs
+
+
+def make_sample_loader(
+    adata: ad.AnnData,
+    X: np.ndarray,
+    indices: np.ndarray,
+    *,
+    pert_col: str,
+    control_label: str,
+    cell_type_col: str,
+    batch_size: int,
+    seed: int,
+) -> DataLoader:
+    """Build a pyg DataLoader over the rows in `indices`.
+
+    Per-cell-line basal donors are drawn from the full control pool of each
+    cell line (matches what scGPT saw at training time). Yields the same
+    Data shape contract as the train/val/test loaders.
+    """
+    pert_arr = adata.obs[pert_col].values.astype(str)
+    cell_line_arr = adata.obs[cell_type_col].values.astype(str)
+    ctrl_mask = pert_arr == control_label
+    ctrl_indices_per_line = {
+        line: np.where(ctrl_mask & (cell_line_arr == line))[0]
+        for line in np.unique(cell_line_arr)
+    }
+    for line, pool in ctrl_indices_per_line.items():
+        if len(pool) == 0:
+            raise RuntimeError(
+                f"cell line {line!r} has no control cells; cannot pair basals"
+            )
+
+    pair_rng = np.random.default_rng(seed)
+    pairs = _pairs_from_indices(
+        indices, pert_arr, cell_line_arr,
+        control_label=control_label,
+        ctrl_indices_per_line=ctrl_indices_per_line,
+        rng=pair_rng,
+    )
+    print(f"==> sample pairs: {len(pairs):,}")
+
+    gene_to_idx = {g: i for i, g in enumerate(adata.var.index.astype(str))}
+    ds = _CellGraphDataset(X, pairs, gene_to_idx)
+    return DataLoader(ds, batch_size=batch_size, shuffle=False)
+
+
 def _build_pairs(
     pert_arr: np.ndarray,
     cell_line_mask: np.ndarray,
@@ -165,12 +238,15 @@ def _build_pairs(
 def load_state_replogle(
     manifest: Manifest,
     args: argparse.Namespace,
-) -> tuple[DataLoader, DataLoader, DataLoader, ad.AnnData, pd.DataFrame]:
-    """Build (train, val, test) pyg DataLoaders, ctrl_adata, var.
+) -> tuple[
+    DataLoader, DataLoader, DataLoader, ad.AnnData, pd.DataFrame, DataLoader | None
+]:
+    """Build (train, val, test, ctrl_adata, var, sample) for state_replogle.
 
-    Test set is restricted to the perturbed-gene overlap between train and
-    test cell lines so the eval isolates cross-cell-line transfer rather
-    than mixing in unseen-perturbation generalization.
+    Test loader restricted to the perturbed-gene overlap between train and
+    test cell lines (isolates cross-cell-line transfer from unseen-pert
+    generalization). `sample` is populated only when args.split == 'sample';
+    it covers train + test cell lines balanced by args.sample_by.
     """
     pert_col = manifest.obs.pert_col
     control_label = manifest.obs.control_label
@@ -266,4 +342,24 @@ def load_state_replogle(
     if "gene_name" not in var.columns:
         var["gene_name"] = var.index.astype(str)
 
-    return train_loader, val_loader, test_loader, ctrl_adata, var
+    sample_loader = None
+    if getattr(args, "split", None) == "sample":
+        from scripts.data.sampling import balanced_sample
+
+        by = [c.strip() for c in args.sample_by.split(",") if c.strip()]
+        indices = balanced_sample(
+            adata.obs, by=by, n_per_bucket=args.sample_n_per_bucket, seed=args.seed,
+        )
+        print(
+            f"==> sample: {len(indices):,} cells across "
+            f"{len(adata.obs.groupby(by, observed=True))} buckets "
+            f"(by={by}, n_per_bucket={args.sample_n_per_bucket})"
+        )
+        sample_loader = make_sample_loader(
+            adata, X, indices,
+            pert_col=pert_col, control_label=control_label,
+            cell_type_col=cell_type_col,
+            batch_size=args.eval_batch_size, seed=args.seed + 2,
+        )
+
+    return train_loader, val_loader, test_loader, ctrl_adata, var, sample_loader

@@ -88,6 +88,7 @@ class ScgptInputs:
     test_loader: Iterable
     ctrl_adata: ad.AnnData
     var: pd.DataFrame
+    sample_loader: Iterable | None = None
 
 
 def _ensure_legacy_x_layout(pert_data) -> None:
@@ -155,15 +156,16 @@ def _load_state_replogle(
     manifest: Manifest, args: argparse.Namespace
 ) -> ScgptInputs:
     """Build pyg DataLoaders from State-Replogle-Filtered for cross-cell-line eval."""
-    train_loader, val_loader, test_loader, ctrl_adata, var = load_state_replogle(
-        manifest, args
-    )
+    (
+        train_loader, val_loader, test_loader, ctrl_adata, var, sample_loader,
+    ) = load_state_replogle(manifest, args)
     return ScgptInputs(
         train_loader=train_loader,
         val_loader=val_loader,
         test_loader=test_loader,
         ctrl_adata=ctrl_adata,
         var=var,
+        sample_loader=sample_loader,
     )
 
 
@@ -865,7 +867,13 @@ def _predict(
         "train": inputs.train_loader,
         "val": inputs.val_loader,
         "test": inputs.test_loader,
+        "sample": inputs.sample_loader,
     }[args.split]
+    if loader is None:
+        raise RuntimeError(
+            f"--split {args.split!r} requested but the loader is None; "
+            f"the source ({type(inputs).__name__}) doesn't expose this split"
+        )
     print(f"==> running inference on {args.split} split")
     if not args.capture_activations:
         return predict(
