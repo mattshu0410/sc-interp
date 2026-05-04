@@ -1,0 +1,37 @@
+name: crosscoder
+model:
+  type: relu                       # relu | batch-top-k
+  code_normalization: crosscoder   # crosscoder | sae | mixed | none | decoupled
+  same_init_for_all_layers: false
+  norm_init_scale: 0.005
+  init_with_transpose: true
+  code_normalization_alpha_sae: 1.0
+  code_normalization_alpha_cc: 0.1
+training:
+  expansion_factor: 8
+  batch_size: 1024
+  chunk_rows: 256
+  steps: 10000
+  lr: 1.0e-4
+  mu: 0.01
+  use_mse_loss: false
+  k: 32
+  k_max: null
+  k_annealing_steps: 0
+  auxk_alpha: 0.03125
+  seed: 0
+  device: null
+  target_rms: 1.0
+  log_steps: 50
+  validate_every_n_steps: null
+  validation_batches: 8
+optimization:
+  warmup_steps: 1000
+  decay_start: null
+  threshold_beta: 0.999
+  threshold_start_step: 1000
+wandb:
+  enabled: false
+  entity: ""
+  project: Diffing-Game-Crosscoder
+  group: ""

@@ -7,3 +7,4 @@ import line here. No other file needs to change.
 
 from scripts.diffing.methods import activation_diff  # noqa: F401
 from scripts.diffing.methods import pca  # noqa: F401
+from scripts.diffing.methods import crosscoder  # noqa: F401

@@ -1,4 +1,4 @@
-"""PCA of activation differences.
+"""PCA of activation differences (GPU via torchdr.IncrementalPCA).
 
 fit() fits principal components on a chosen target tensor derived from
 the pair, streaming through chunks. score() projects each chunk into
@@ -16,8 +16,9 @@ Summary outputs, written once at end:
     explained_variance        (1, n_components)
     explained_variance_ratio  (1, n_components)
 
-Streaming via IncrementalPCA.partial_fit + transform, so peak memory is
-O(chunk_rows × features) regardless of total pair size.
+Streaming via IncrementalPCA.partial_fit + transform; activations stay
+on `device` ("cuda" by default when available) so the SVD per batch is
+GPU-accelerated. CPU fallback is automatic for hosts without CUDA.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ import pickle
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import torch
 
 from scripts.diffing.base import DiffMethod, DiffPair, register
@@ -52,6 +52,12 @@ def _select_target(a: torch.Tensor, b: torch.Tensor, target: Target) -> torch.Te
     raise ValueError(f"unknown PCA target {target!r}")
 
 
+def _resolve_device(device: str) -> str:
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
 @register("pca")
 class PCA(DiffMethod):
     supports_cross_arch = False
@@ -63,11 +69,13 @@ class PCA(DiffMethod):
         n_components: int = 50,
         batch_size: int = _CHUNK_ROWS,
         target: Target = "b_minus_a",
+        device: str = "auto",
     ):
         self.n_components = n_components
         self.batch_size = batch_size
         self.target = target
-        self._ipca = None  # sklearn.decomposition.IncrementalPCA
+        self.device = _resolve_device(device)
+        self._ipca = None  # torchdr.IncrementalPCA
 
     @classmethod
     def from_config(cls, cfg) -> "PCA":
@@ -76,15 +84,18 @@ class PCA(DiffMethod):
             n_components=t.n_components,
             batch_size=t.batch_size,
             target=t.target,
+            device=t.get("device", "auto"),
         )
 
     def config_tag(self) -> str:
         return f"n{self.n_components}_{self.target}"
 
     def _new_ipca(self):
-        from sklearn.decomposition import IncrementalPCA
+        from torchdr import IncrementalPCA
         return IncrementalPCA(
-            n_components=self.n_components, batch_size=self.batch_size
+            n_components=self.n_components,
+            batch_size=self.batch_size,
+            device=self.device,
         )
 
     def _iter_target_chunks(self, pair: DiffPair):
@@ -93,16 +104,14 @@ class PCA(DiffMethod):
         for (a_c, a_labels), (b_c, _) in zip(a_iter, b_iter):
             a_al, b_al = pair.alignment.apply(a_c, b_c)
             tgt = _select_target(a_al, b_al, self.target)
-            flat = tgt.reshape(tgt.shape[0], -1).numpy()
+            flat = tgt.reshape(tgt.shape[0], -1).to(self.device)
             yield flat, a_labels
 
     def fit(self, pair: DiffPair) -> None:
         self._ipca = self._new_ipca()
         for batch, _ in self._iter_target_chunks(pair):
-            # sklearn's IncrementalPCA requires the *first* partial_fit batch
-            # to contain >= n_components rows; later batches can be smaller.
-            # Skip under-sized chunks before the first fit; after that, any
-            # size is accepted.
+            # IncrementalPCA's first partial_fit batch must contain
+            # >= n_components rows; later batches can be smaller.
             if not hasattr(self._ipca, "components_") and batch.shape[0] < self.n_components:
                 continue
             self._ipca.partial_fit(batch)
@@ -121,7 +130,7 @@ class PCA(DiffMethod):
             sink.write(
                 ActivationRecord(
                     name="pc_scores",
-                    tensor=torch.from_numpy(pc_scores).float(),
+                    tensor=pc_scores.detach().cpu().float(),
                     metadata_tags={},
                     per_cell=a_labels,
                     layout="BD",
@@ -129,8 +138,8 @@ class PCA(DiffMethod):
             )
             sink.batch_end()
 
-        evr = torch.from_numpy(self._ipca.explained_variance_ratio_).float().unsqueeze(0)
-        ev = torch.from_numpy(self._ipca.explained_variance_).float().unsqueeze(0)
+        evr = self._ipca.explained_variance_ratio_.detach().cpu().float().unsqueeze(0)
+        ev = self._ipca.explained_variance_.detach().cpu().float().unsqueeze(0)
         sink.write(
             ActivationRecord(
                 name="explained_variance_ratio",
@@ -155,16 +164,19 @@ class PCA(DiffMethod):
         if self._ipca is None or not hasattr(self._ipca, "components_"):
             raise RuntimeError("PCA.save() called before fit()")
 
-        # Match upstream's pickled state dict schema so models can be moved
-        # between projects with minimal translation.
+        # Pickle CPU tensors so the checkpoint loads on hosts without CUDA.
         state = {
-            "components_": self._ipca.components_,
-            "explained_variance_": self._ipca.explained_variance_,
-            "explained_variance_ratio_": self._ipca.explained_variance_ratio_,
-            "mean_": self._ipca.mean_,
-            "var_": getattr(self._ipca, "var_", None),
+            "components_": self._ipca.components_.detach().cpu(),
+            "explained_variance_": self._ipca.explained_variance_.detach().cpu(),
+            "explained_variance_ratio_": self._ipca.explained_variance_ratio_.detach().cpu(),
+            "mean_": self._ipca.mean_.detach().cpu(),
+            "var_": (
+                self._ipca.var_.detach().cpu()
+                if getattr(self._ipca, "var_", None) is not None
+                else None
+            ),
             "noise_variance_": getattr(self._ipca, "noise_variance_", None),
-            "n_components": self._ipca.n_components,
+            "n_components": int(self._ipca.n_components),
             "n_samples_seen_": int(self._ipca.n_samples_seen_),
             "batch_size": self.batch_size,
             "target": self.target,
@@ -174,7 +186,7 @@ class PCA(DiffMethod):
             pickle.dump(state, f)
 
     @classmethod
-    def load(cls, out_dir: Path) -> "PCA":
+    def load(cls, out_dir: Path, device: str = "auto") -> "PCA":
         with open(out_dir / _CHECKPOINT_FILENAME, "rb") as f:
             state = pickle.load(f)
 
@@ -182,23 +194,16 @@ class PCA(DiffMethod):
             n_components=int(state["n_components"]),
             batch_size=int(state["batch_size"]),
             target=state["target"],
+            device=device,
         )
         ipca = obj._new_ipca()
-        ipca.components_ = _as_numpy(state["components_"])
-        ipca.explained_variance_ = _as_numpy(state["explained_variance_"])
-        ipca.explained_variance_ratio_ = _as_numpy(state["explained_variance_ratio_"])
-        ipca.mean_ = _as_numpy(state["mean_"])
+        ipca.components_ = state["components_"].to(obj.device)
+        ipca.explained_variance_ = state["explained_variance_"].to(obj.device)
+        ipca.explained_variance_ratio_ = state["explained_variance_ratio_"].to(obj.device)
+        ipca.mean_ = state["mean_"].to(obj.device)
         if state.get("var_") is not None:
-            ipca.var_ = _as_numpy(state["var_"])
+            ipca.var_ = state["var_"].to(obj.device)
         ipca.noise_variance_ = state.get("noise_variance_")
-        ipca.n_components_ = int(state["n_components"])
         ipca.n_samples_seen_ = int(state["n_samples_seen_"])
-        ipca.batch_size_ = int(state["batch_size"])
         obj._ipca = ipca
         return obj
-
-
-def _as_numpy(x) -> np.ndarray:
-    if isinstance(x, torch.Tensor):
-        return x.cpu().numpy()
-    return np.asarray(x)
