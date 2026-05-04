@@ -137,6 +137,13 @@ def _escape_segment(s: str) -> str:
     return s.replace("%", "%25").replace("/", "%2F").replace("=", "%3D")
 
 
+def _stats_view(tensor: torch.Tensor, layout: str) -> torch.Tensor:
+    # BTD: collapse the token axis into samples so running_stats are per-feature-dim.
+    if layout == "BTD" and tensor.ndim == 3:
+        return tensor.reshape(-1, tensor.shape[-1])
+    return tensor
+
+
 def group_path(name: str, tags: dict[str, str]) -> str:
     esc_name = _escape_segment(name)
     segments = [
@@ -405,7 +412,7 @@ class H5ActivationSink:
         if self.compute_running_stats:
             key = (record.name, tuple(sorted(record.metadata_tags.items())))
             acc = self._running_stats.setdefault(key, _RunningStatWelford())
-            acc.update(record.tensor)
+            acc.update(_stats_view(record.tensor, record.layout))
 
     def _write_running_stats_to(self, f: h5py.File) -> None:
         # Idempotent dump of current accumulator snapshots into `f`.
