@@ -20,7 +20,11 @@ def balanced_sample(
     """Greedy: up to n_per_bucket rows per unique combination of `by` columns.
 
     Buckets with fewer than n_per_bucket rows return all of them. Returned
-    indices are sorted for deterministic h5 write order.
+    indices are randomly permuted (seeded) so that the resulting sample
+    interleaves all bucket combinations across position. This matters for
+    activation captures consumed by SAE/crosscoder training: sequential
+    chunk reads then yield mixed-bucket batches, removing the need for a
+    global shuffle at training time.
     """
     if not by:
         raise ValueError("balanced_sample requires at least one column in `by`")
@@ -34,4 +38,4 @@ def balanced_sample(
         n = min(len(group_indices), n_per_bucket)
         sampled = rng.choice(group_indices, size=n, replace=False)
         indices.append(sampled)
-    return np.sort(np.concatenate(indices))
+    return rng.permutation(np.concatenate(indices))
