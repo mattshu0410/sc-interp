@@ -8,7 +8,9 @@ Crosscoders to Interpret Chat-Tuning" (NeurIPS 2025, arXiv:2504.02922).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Callable, Iterable
 
 import torch
@@ -232,6 +234,7 @@ def _compute_betas_for_set(
     chunk_rows: int,
     device: str,
     progress: bool,
+    num_samples: int | None = None,
 ) -> LatentScalingResults:
     layer_for_side = 0 if side == "a" else 1
     latent_vectors = model.decoder.weight[layer_for_side, indices, :].detach().to(device)
@@ -245,12 +248,18 @@ def _compute_betas_for_set(
         "b_error": _layer_error_target(1),
     }
 
+    n_batches = (
+        math.ceil(num_samples / batch_size) if num_samples is not None else None
+    )
+
     result = LatentScalingResults(indices=indices.cpu(), side=side)
     for name, target_fn in targets.items():
         batches = _tensor_only(iter_pair_samples(
             pair, batch_size=batch_size, chunk_rows=chunk_rows,
             device=device, shuffle=False,
         ))
+        if n_batches is not None:
+            batches = islice(batches, n_batches)
         betas, counts = closed_form_scalars(
             latent_vectors=latent_vectors,
             latent_indices=latent_indices,
@@ -275,6 +284,7 @@ def compute_latent_scaling(
     n_shared_baseline: int = 100,
     batch_size: int = 1024,
     chunk_rows: int = 128,
+    num_samples: int | None = 100_000,
     device: str | None = None,
     progress: bool = True,
 ) -> dict[str, LatentScalingResults]:
@@ -311,7 +321,7 @@ def compute_latent_scaling(
         out[set_name] = _compute_betas_for_set(
             model, pair, indices, side,
             batch_size=batch_size, chunk_rows=chunk_rows,
-            device=device, progress=progress,
+            device=device, progress=progress, num_samples=num_samples,
         )
     return out
 
@@ -388,6 +398,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--chunk-rows", type=int, default=128)
     p.add_argument("--threshold-specific", type=float, default=0.9)
+    p.add_argument("--num-samples", type=int, default=100_000)
     args = p.parse_args(argv)
 
     scores_path = args.model_dir / "scores.h5"
@@ -412,6 +423,7 @@ def main(argv: list[str] | None = None) -> None:
         n_shared_baseline=args.n_shared_baseline,
         batch_size=args.batch_size,
         chunk_rows=args.chunk_rows,
+        num_samples=(args.num_samples if args.num_samples > 0 else None),
         device=args.device,
     )
 
