@@ -59,19 +59,12 @@ class _RunningStatWelford:
         self.mean: torch.Tensor | None = None
         self.M2: torch.Tensor | None = None
         self._feature_shape: tuple[int, ...] | None = None
-        self._dtype: torch.dtype | None = None
+        self._dtype: torch.dtype = torch.float64
 
     def update(self, x: torch.Tensor) -> None:
         if x.numel() == 0:
             return
-        x = x.detach().cpu()
-        if not x.dtype.is_floating_point:
-            x = x.to(torch.float32)
-
-        if self._dtype is None:
-            self._dtype = x.dtype
-        elif x.dtype != self._dtype:
-            x = x.to(self._dtype)
+        x = x.detach().cpu().to(self._dtype)
 
         batch_size = x.shape[0]
         if self._feature_shape is None:
@@ -116,7 +109,7 @@ class _RunningStatWelford:
         self.mean = None
         self.M2 = None
         self._feature_shape = None
-        self._dtype = None
+        self._dtype = torch.float64
 
 
 def default_activation_out(

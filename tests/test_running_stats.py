@@ -104,15 +104,37 @@ def test_running_stats_singleton_batches(tmp_path: Path) -> None:
     )
 
 
-def test_running_stats_dtype_matches_input(tmp_path: Path) -> None:
+def test_running_stats_accumulates_in_fp64(tmp_path: Path) -> None:
     path = tmp_path / "act.h5"
     with _sink(path) as sink:
         sink.write(_rec("lin", torch.randn(8, 4, dtype=torch.float32)))
     with H5ActivationReader(path) as r:
         stats = r.running_stats("lin")
     assert stats is not None
-    assert stats.mean.dtype == torch.float32
-    assert stats.M2.dtype == torch.float32
+    assert stats.mean.dtype == torch.float64
+    assert stats.M2.dtype == torch.float64
+
+
+def test_running_stats_fp16_input_no_overflow(tmp_path: Path) -> None:
+    # Regression: a narrower accumulator would push M2 = Σ(x-μ)² past
+    # fp16's 65 504 ceiling within ~65k unit-variance samples. The fp64
+    # accumulator must keep M2 finite across millions of fp16 inputs.
+    torch.manual_seed(7)
+    n_per_batch, d, n_batches = 1024, 16, 200
+    path = tmp_path / "act.h5"
+    with _sink(path) as sink:
+        for _ in range(n_batches):
+            sink.write(_rec("lin", torch.randn(n_per_batch, d).half()))
+    with H5ActivationReader(path) as r:
+        stats = r.running_stats("lin")
+    assert stats is not None
+    assert stats.count == n_per_batch * n_batches
+    assert torch.isfinite(stats.M2).all()
+    torch.testing.assert_close(
+        stats.std(unbiased=False),
+        torch.ones(d, dtype=torch.float64),
+        atol=2e-2, rtol=2e-2,
+    )
 
 
 def test_running_stats_higher_rank_feature_shape(tmp_path: Path) -> None:
