@@ -543,7 +543,8 @@ def maybe_finetune(
     args: argparse.Namespace,
 ) -> tuple[TransformerGenerator, TrainStats]:
     """Resolve the fine-tuned weights via cache_or_train, mutating model in place."""
-    variant = "esm" if model.gene_prior is not None else "base"
+    default_variant = "esm" if model.gene_prior is not None else "base"
+    variant = getattr(args, "variant", None) or default_variant
     cache_dir = finetune_cache_dir(dataset, variant=variant)
 
     def _load(cache: Path) -> TransformerGenerator:
@@ -853,6 +854,23 @@ def _add_args(p: argparse.ArgumentParser) -> None:
         default=None,
         help="safetensors with [vocab, prior_dim] frozen per-gene prior table",
     )
+    p.add_argument(
+        "--gene-prior-shuffle-seed",
+        type=int,
+        default=0,
+        help="0 = no shuffle. Non-zero = permute gene_prior.table rows with this seed "
+             "before inference (ablation: destroys the gene→protein mapping while "
+             "preserving the magnitude/distribution of the contribution).",
+    )
+    p.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Override the variant tag used to derive the finetune cache dir. "
+             "Default: 'esm' if --gene-prior-path is set, else 'base'. Use to "
+             "isolate retrain controls (e.g. --variant esm_random) from existing "
+             "checkpoints.",
+    )
 
 
 def _train_or_load(
@@ -883,10 +901,33 @@ def _train_or_load(
             reason="skipped",
             details={"mode": "skip_finetune", "pretrained_dir": str(args.pretrained_dir)},
         )
+        _maybe_shuffle_gene_prior(model, args.gene_prior_shuffle_seed)
         return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
 
     model, stats = maybe_finetune(model, inputs, gene_ids, dataset, device, args)
+    _maybe_shuffle_gene_prior(model, args.gene_prior_shuffle_seed)
     return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
+
+
+def _maybe_shuffle_gene_prior(
+    model: TransformerGenerator, seed: int
+) -> None:
+    """Permute gene_prior.table rows in place. seed=0 is the no-op default."""
+    if seed == 0:
+        return
+    if model.gene_prior is None:
+        raise ValueError(
+            "--gene-prior-shuffle-seed != 0 but model has no gene_prior; "
+            "pass --gene-prior-path PATH to enable the prior first."
+        )
+    table = model.gene_prior.table
+    g = torch.Generator(device=table.device).manual_seed(seed)
+    perm = torch.randperm(table.shape[0], generator=g, device=table.device)
+    table.copy_(table[perm].clone())
+    print(
+        f"==> shuffled gene_prior.table with seed {seed} "
+        f"(n={table.shape[0]} rows permuted)"
+    )
 
 
 def _predict(
