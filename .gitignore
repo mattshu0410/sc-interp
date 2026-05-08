@@ -29,6 +29,9 @@ models/*/checkpoints/
 predictions/
 eval_outputs/
 
+# wandb run logs
+wandb/
+
 # Papers: keep markdown, ignore the source PDFs (may have copyright)
 docs/papers/*.pdf
 
