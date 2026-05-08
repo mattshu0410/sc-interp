@@ -13,6 +13,9 @@ source .venv/bin/activate
 
 uv pip install torch torchvision
 uv pip install torchdr matplotlib
+# faiss-gpu-cu12 backs torchdr's neighbour search (UMAP / LargeVis / PaCMAP).
+# The legacy `faiss-gpu` PyPI package is deprecated; this is the CUDA-12 build.
+uv pip install faiss-gpu-cu12
 uv pip install hydra-core omegaconf
 uv pip install scikit-learn h5py numpy einops
 uv pip install pytest wandb
