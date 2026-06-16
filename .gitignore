@@ -1,6 +1,7 @@
 # Virtual environments
 .venv/
 venv/
+.uv-python/
 
 # Python
 __pycache__/
@@ -18,6 +19,7 @@ data/**
 !data/*.sh
 !data/manifests/
 !data/manifests/*.yaml
+cache
 
 # Model artifacts (downloaded via setup scripts)
 _artifacts/
@@ -26,6 +28,9 @@ models/*/checkpoints/
 # Inference outputs and cell-eval results
 predictions/
 eval_outputs/
+
+# wandb run logs
+wandb/
 
 # Papers: keep markdown, ignore the source PDFs (may have copyright)
 docs/papers/*.pdf
@@ -36,6 +41,9 @@ docs/papers/*.pdf
 
 # Claude Code local session state
 .claude/
+
+# Personal planning notes (local only)
+plans/
 
 # OS
 .DS_Store

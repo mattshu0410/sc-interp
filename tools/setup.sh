@@ -31,4 +31,11 @@ uv pip install \
 # scripts/analyse/eval_cell_eval.py and scripts/analyse/paper_metrics.py
 uv pip install cell-eval
 
+# HuggingFace Hub for dataset/model uploads and downloads.
+# safetensors is needed by data/build_scgpt_esm_prior.sh.
+uv pip install huggingface_hub safetensors
+
+# pytest for scripts/diffing/ and other tools tests.
+uv pip install pytest
+
 echo "==> tools venv ready at $TOOLS_DIR/.venv"

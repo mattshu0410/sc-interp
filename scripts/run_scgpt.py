@@ -26,6 +26,7 @@ import json
 import time
 import warnings
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -35,12 +36,19 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import torch
+
+# pandas 3.0 + anndata 0.9 ArrowStringArray compat — must precede gears.
+from scripts.data.gears import attach_obs_names_to_pert_data, configure_pandas_for_gears
+from scripts.data.state_replogle import load_state_replogle
+configure_pandas_for_gears()
+
 from gears import PertData
 from nnsight import NNsight
 from tqdm import tqdm
 
 from scgpt.loss import masked_mse_loss
 from scgpt.model import TransformerGenerator
+from scgpt.model.gene_priors import GenePriorEncoder
 from scgpt.model.generation_model import map_raw_id_to_vocab_id
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.utils import compute_perturbation_metrics, set_seed
@@ -69,12 +77,18 @@ DEFAULT_PRETRAINED = CKPT_ROOT / "scGPT_human"
 
 @dataclass
 class ScgptInputs:
-    """Everything finetune/predict need from the dataset loader."""
-    pert_data: PertData
+    """Everything finetune/predict need from the dataset loader.
+
+    Source-neutral: each loader (gears, state_replogle, …) is responsible
+    for producing pyg-compatible DataLoaders and the control-cell subset.
+    The runner does not touch any source-specific object (PertData, etc.).
+    """
     train_loader: Iterable
     val_loader: Iterable
     test_loader: Iterable
+    ctrl_adata: ad.AnnData
     var: pd.DataFrame
+    sample_loader: Iterable | None = None
 
 
 def _ensure_legacy_x_layout(pert_data) -> None:
@@ -116,6 +130,7 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     pert_data = PertData(str(REPO_ROOT / "data"), default_pert_graph=False)
     pert_data.load(data_name=manifest.raw["gears_name"])
     _ensure_legacy_x_layout(pert_data)
+    attach_obs_names_to_pert_data(pert_data)
     pert_data.prepare_split(
         split=manifest.raw.get("split", {}).get("default", args.split_type),
         seed=args.seed,
@@ -123,17 +138,40 @@ def _load_gears(manifest: Manifest, args: argparse.Namespace) -> ScgptInputs:
     pert_data.get_dataloader(
         batch_size=args.batch_size, test_batch_size=args.eval_batch_size
     )
+    pert_col = manifest.obs.pert_col
+    control_label = manifest.obs.control_label
+    ctrl_adata = pert_data.adata[
+        pert_data.adata.obs[pert_col] == control_label
+    ].copy()
     return ScgptInputs(
-        pert_data=pert_data,
         train_loader=pert_data.dataloader["train_loader"],
         val_loader=pert_data.dataloader["val_loader"],
         test_loader=pert_data.dataloader["test_loader"],
+        ctrl_adata=ctrl_adata,
         var=pert_data.adata.var.copy(),
+    )
+
+
+def _load_state_replogle(
+    manifest: Manifest, args: argparse.Namespace
+) -> ScgptInputs:
+    """Build pyg DataLoaders from State-Replogle-Filtered for cross-cell-line eval."""
+    (
+        train_loader, val_loader, test_loader, ctrl_adata, var, sample_loader,
+    ) = load_state_replogle(manifest, args)
+    return ScgptInputs(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        ctrl_adata=ctrl_adata,
+        var=var,
+        sample_loader=sample_loader,
     )
 
 
 LOADERS: dict[str, Callable[[Manifest, argparse.Namespace], ScgptInputs]] = {
     "gears": _load_gears,
+    "state_replogle": _load_state_replogle,
 }
 
 
@@ -169,7 +207,11 @@ def build_gene_ids(var: pd.DataFrame, vocab: GeneVocab) -> np.ndarray:
     return gene_ids
 
 
-def build_model(margs: dict, vocab: GeneVocab) -> TransformerGenerator:
+def build_model(
+    margs: dict,
+    vocab: GeneVocab,
+    gene_prior: GenePriorEncoder | None = None,
+) -> TransformerGenerator:
     return TransformerGenerator(
         ntoken=len(vocab),
         d_model=margs["embsize"],
@@ -184,6 +226,7 @@ def build_model(margs: dict, vocab: GeneVocab) -> TransformerGenerator:
         pad_value=margs.get("pad_value", 0),
         pert_pad_id=margs.get("pert_pad_id", 2),
         use_fast_transformer=False,
+        gene_prior=gene_prior,
     )
 
 
@@ -326,7 +369,7 @@ def forward_pass(
 def evaluate_val(
     model: TransformerGenerator,
     loader: Iterable,
-    pert_data: PertData,
+    ctrl_adata: ad.AnnData,
     gene_ids: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
@@ -349,7 +392,6 @@ def evaluate_val(
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
-    ctrl_adata = pert_data.adata[pert_data.adata.obs["condition"] == "ctrl"]
     return compute_perturbation_metrics(results, ctrl_adata)
 
 
@@ -419,7 +461,7 @@ def finetune(
         metrics = evaluate_val(
             model,
             inputs.val_loader,
-            inputs.pert_data,
+            inputs.ctrl_adata,
             gene_ids,
             include_zero_gene,
             device,
@@ -483,9 +525,13 @@ def finetune(
     return model, stats
 
 
-def finetune_cache_dir(dataset: str) -> Path:
-    """Per-dataset cache directory under models/scgpt/checkpoints/."""
-    return CKPT_ROOT / f"{dataset}_ft"
+def finetune_cache_dir(dataset: str, *, variant: str = "base") -> Path:
+    """Per-(dataset, variant) cache directory under models/scgpt/checkpoints/.
+
+    `variant` discriminates architectural changes that would otherwise
+    silently reuse the wrong cache (e.g. base vs gene-prior-augmented).
+    """
+    return CKPT_ROOT / f"{dataset}_{variant}_ft"
 
 
 def maybe_finetune(
@@ -497,7 +543,9 @@ def maybe_finetune(
     args: argparse.Namespace,
 ) -> tuple[TransformerGenerator, TrainStats]:
     """Resolve the fine-tuned weights via cache_or_train, mutating model in place."""
-    cache_dir = finetune_cache_dir(dataset)
+    default_variant = "esm" if model.gene_prior is not None else "base"
+    variant = getattr(args, "variant", None) or default_variant
+    cache_dir = finetune_cache_dir(dataset, variant=variant)
 
     def _load(cache: Path) -> TransformerGenerator:
         load_finetuned_weights(model, cache / "best_model.pt", device)
@@ -542,15 +590,20 @@ def predict(
     gene_ids: np.ndarray,
     include_zero_gene: str,
     device: torch.device,
+    limit_num_batches: int | None = None,
 ) -> dict:
     model.eval()
     pert_cat: list[str] = []
+    cell_ids: list[str] = []
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
-    for batch in tqdm(loader, total=len(loader), desc="scgpt predict"):
+    total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+    it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+    for batch in tqdm(it, total=total, desc="scgpt predict"):
         batch.to(device)
         pert_cat.extend(batch.pert)
+        cell_ids.extend(batch.obs_name)
         p = model.pred_perturb(
             batch, include_zero_gene=include_zero_gene, gene_ids=gene_ids
         )
@@ -559,6 +612,7 @@ def predict(
 
     return {
         "pert": np.array(pert_cat),
+        "cell_id": np.array(cell_ids, dtype=object),
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
@@ -578,6 +632,8 @@ def predict_with_capture(
     dataset: str,
     split: str,
     batches_per_shard: int | None = None,
+    limit_num_batches: int | None = None,
+    capture_layers: str = "all",
 ) -> dict:
     """predict() variant that captures per-layer hidden states via HookManager.
 
@@ -599,6 +655,16 @@ def predict_with_capture(
            "BTD")
           for i in range(len(model.transformer_encoder.layers))],
     ]
+    if capture_layers != "all":
+        requested = {s.strip() for s in capture_layers.split(",") if s.strip()}
+        valid = {name for name, *_ in targets}
+        unknown = sorted(requested - valid)
+        if unknown:
+            raise ValueError(
+                f"unknown capture layer(s) {unknown}; valid: {sorted(valid)}"
+            )
+        targets = [t for t in targets if t[0] in requested]
+        print(f"==> capturing {len(targets)} layer(s): {[t[0] for t in targets]}")
     # Force the dense forward path on the transformer encoder. With
     # src_key_padding_mask set and no flash_attn available, nn.TransformerEncoder
     # packs the batch into a NestedTensor between layers and only unpacks at
@@ -612,6 +678,7 @@ def predict_with_capture(
     nn_model = NNsight(model)
 
     pert_cat: list[str] = []
+    cell_ids: list[str] = []
     preds: list[torch.Tensor] = []
     truths: list[torch.Tensor] = []
 
@@ -637,7 +704,9 @@ def predict_with_capture(
     ) as hm:
         hm.set_tag("phase", "predict")
         cell_offset = 0
-        for batch in tqdm(loader, total=len(loader), desc="scgpt capture"):
+        total = len(loader) if limit_num_batches is None else min(len(loader), limit_num_batches)
+        it = loader if limit_num_batches is None else islice(loader, limit_num_batches)
+        for batch in tqdm(it, total=total, desc="scgpt capture"):
             pert_cat.extend(batch.pert)
             fa = build_forward_args(
                 batch, gene_ids, include_zero_gene, device, max_seq_len
@@ -648,7 +717,8 @@ def predict_with_capture(
             # cells in one batch share the same window. .expand is a view;
             # the sink materializes to numpy, so no mem blowup before then.
             hm.set_per_cell({
-                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "cell_id": np.array(batch.obs_name, dtype=object),
+                "cell_index": torch.arange(cell_offset, cell_offset + bs),
                 "pert": np.array(batch.pert, dtype=object),
                 "gene_dataset_ids": fa.input_gene_ids.unsqueeze(0).expand(bs, -1).contiguous().cpu(),
             })
@@ -667,10 +737,12 @@ def predict_with_capture(
             pred_full = scatter_back(output_values, fa.input_gene_ids, fa.n_genes)
             preds.extend(pred_full.cpu())
             truths.extend(batch.y.cpu())
+            cell_ids.extend(batch.obs_name)
             cell_offset += bs
 
     return {
         "pert": np.array(pert_cat),
+        "cell_id": np.array(cell_ids, dtype=object),
         "pred": torch.stack(preds).numpy().astype(np.float32),
         "truth": torch.stack(truths).numpy().astype(np.float32),
     }
@@ -699,16 +771,33 @@ def save_predictions(
     """
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    ctrl_X = ctrl_adata.X.toarray() if hasattr(ctrl_adata.X, "toarray") else np.asarray(ctrl_adata.X)
-    pred_X = np.vstack([results["pred"], ctrl_X])
-    truth_X = np.vstack([results["truth"], ctrl_X])
-    labels = np.concatenate(
-        [results["pert"], np.array([control_label] * ctrl_adata.n_obs)]
-    )
+    # Sample mode already balance-samples controls into the loader output
+    # via the (cell_line, non-targeting) buckets, so re-appending the full
+    # ctrl_adata pool would duplicate those cells in the h5ad. Skip the
+    # append for sample; keep it for train/val/test where it gives Cell-Eval
+    # the full basal reference distribution.
+    if split == "sample":
+        pred_X = results["pred"]
+        truth_X = results["truth"]
+        labels = results["pert"]
+        cell_ids = results["cell_id"]
+        n_ctrl_appended = 0
+    else:
+        ctrl_X = ctrl_adata.X.toarray() if hasattr(ctrl_adata.X, "toarray") else np.asarray(ctrl_adata.X)
+        pred_X = np.vstack([results["pred"], ctrl_X])
+        truth_X = np.vstack([results["truth"], ctrl_X])
+        labels = np.concatenate(
+            [results["pert"], np.array([control_label] * ctrl_adata.n_obs)]
+        )
+        cell_ids = np.concatenate(
+            [results["cell_id"], ctrl_adata.obs.index.values.astype(object)]
+        )
+        n_ctrl_appended = ctrl_adata.n_obs
 
+    obs = pd.DataFrame({pert_col: labels}, index=pd.Index(cell_ids, name="cell_id"))
     adata = ad.AnnData(
         X=pred_X,
-        obs=pd.DataFrame({pert_col: labels}),
+        obs=obs,
         var=var.copy(),
         layers={"truth": truth_X},
     )
@@ -719,7 +808,7 @@ def save_predictions(
     adata.uns["control_label"] = control_label
     adata.uns["train_stats"] = train_stats.__dict__
     adata.write_h5ad(output)
-    print(f"==> wrote {adata.shape} to {output} ({ctrl_adata.n_obs} control cells included)")
+    print(f"==> wrote {adata.shape} to {output} ({n_ctrl_appended} control cells appended)")
 
 
 # ── Runner spec ───────────────────────────────────────────────────────────────
@@ -757,6 +846,31 @@ def _add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--amp", action="store_true", default=True)
     p.add_argument("--max-seq-len", type=int, default=1536)
+    p.add_argument("--skip-finetune", action="store_true")
+    p.add_argument("--limit-num-batches", type=int, default=None)
+    p.add_argument(
+        "--gene-prior-path",
+        type=Path,
+        default=None,
+        help="safetensors with [vocab, prior_dim] frozen per-gene prior table",
+    )
+    p.add_argument(
+        "--gene-prior-shuffle-seed",
+        type=int,
+        default=0,
+        help="0 = no shuffle. Non-zero = permute gene_prior.table rows with this seed "
+             "before inference (ablation: destroys the gene→protein mapping while "
+             "preserving the magnitude/distribution of the contribution).",
+    )
+    p.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Override the variant tag used to derive the finetune cache dir. "
+             "Default: 'esm' if --gene-prior-path is set, else 'base'. Use to "
+             "isolate retrain controls (e.g. --variant esm_random) from existing "
+             "checkpoints.",
+    )
 
 
 def _train_or_load(
@@ -771,11 +885,49 @@ def _train_or_load(
     with open(args.pretrained_dir / "args.json") as f:
         margs = json.load(f)
     gene_ids = build_gene_ids(inputs.var, vocab)
-    model = build_model(margs, vocab).to(device)
+    gene_prior = None
+    if args.gene_prior_path is not None:
+        gene_prior = GenePriorEncoder.from_safetensors(
+            args.gene_prior_path, d_model=margs["embsize"]
+        )
+        print(f"==> loaded gene prior from {args.gene_prior_path}")
+    model = build_model(margs, vocab, gene_prior=gene_prior).to(device)
     load_pretrained_weights(model, args.pretrained_dir / "best_model.pt", device)
 
+    if args.skip_finetune:
+        stats = TrainStats(
+            wall_clock_s=0.0,
+            wandb_run_url=None,
+            reason="skipped",
+            details={"mode": "skip_finetune", "pretrained_dir": str(args.pretrained_dir)},
+        )
+        _maybe_shuffle_gene_prior(model, args.gene_prior_shuffle_seed)
+        return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
+
     model, stats = maybe_finetune(model, inputs, gene_ids, dataset, device, args)
+    _maybe_shuffle_gene_prior(model, args.gene_prior_shuffle_seed)
     return ScgptTrained(model=model, gene_ids=gene_ids, device=device), stats
+
+
+def _maybe_shuffle_gene_prior(
+    model: TransformerGenerator, seed: int
+) -> None:
+    """Permute gene_prior.table rows in place. seed=0 is the no-op default."""
+    if seed == 0:
+        return
+    if model.gene_prior is None:
+        raise ValueError(
+            "--gene-prior-shuffle-seed != 0 but model has no gene_prior; "
+            "pass --gene-prior-path PATH to enable the prior first."
+        )
+    table = model.gene_prior.table
+    g = torch.Generator(device=table.device).manual_seed(seed)
+    perm = torch.randperm(table.shape[0], generator=g, device=table.device)
+    table.copy_(table[perm].clone())
+    print(
+        f"==> shuffled gene_prior.table with seed {seed} "
+        f"(n={table.shape[0]} rows permuted)"
+    )
 
 
 def _predict(
@@ -790,11 +942,18 @@ def _predict(
         "train": inputs.train_loader,
         "val": inputs.val_loader,
         "test": inputs.test_loader,
+        "sample": inputs.sample_loader,
     }[args.split]
+    if loader is None:
+        raise RuntimeError(
+            f"--split {args.split!r} requested but the loader is None; "
+            f"the source ({type(inputs).__name__}) doesn't expose this split"
+        )
     print(f"==> running inference on {args.split} split")
     if not args.capture_activations:
         return predict(
-            trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device
+            trained.model, loader, trained.gene_ids, args.include_zero_gene, trained.device,
+            limit_num_batches=args.limit_num_batches,
         )
     activation_out = args.activation_out or default_activation_out(
         REPO_ROOT, "scgpt", args.dataset, args.split
@@ -818,6 +977,8 @@ def _predict(
         args.dataset,
         args.split,
         batches_per_shard=args.batches_per_shard,
+        limit_num_batches=args.limit_num_batches,
+        capture_layers=args.capture_layers,
     )
 
 
@@ -830,11 +991,6 @@ def _save_predictions(
     output: Path,
 ) -> None:
     """Invoke the module-level save_predictions with resolved manifest fields."""
-    pert_col = manifest.obs.pert_col
-    control_label = manifest.obs.control_label
-    ctrl_adata = inputs.pert_data.adata[
-        inputs.pert_data.adata.obs[pert_col] == control_label
-    ]
     save_predictions(
         results,
         inputs.var,
@@ -842,9 +998,9 @@ def _save_predictions(
         args.dataset,
         args.split,
         stats,
-        ctrl_adata,
-        pert_col,
-        control_label,
+        inputs.ctrl_adata,
+        manifest.obs.pert_col,
+        manifest.obs.control_label,
     )
 
 

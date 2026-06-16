@@ -1,0 +1,17 @@
+name: replogle
+description: State-Replogle-Filtered concat h5ad — Replogle 2022 + Nadig 2025, 4 cell lines (K562, RPE1, Jurkat, HepG2)
+source: state_replogle
+shape:
+  cells: 643413
+  genes: 6546
+obs:
+  pert_col: gene
+  control_label: non-targeting
+  cell_type_col: cell_line
+var:
+  gene_id_type: symbol               # var.index is HGNC symbols directly
+files:
+  adata: replogle_concat.h5ad
+split:
+  default: k562_to_rpe1               # train on K562, test on RPE1, val carved from K562 perts
+  val_pert_fraction: 0.05

@@ -508,8 +508,18 @@ def predict_with_capture(
             conditions, total=len(conditions), desc="cellflow capture"
         ):
             bs = source_x.shape[0]
+            # Synthetic cell_id pending real obs_name plumbing through
+            # PredictionSampler. Stable across runs on the same dataset
+            # because PredictionSampler.sample() is deterministic (boolean
+            # mask, no rng), so the i-th source cell for a condition is the
+            # same control cell on every run. Cross-dataset comparisons need
+            # actual barcodes; tracked separately.
+            cell_ids = np.array(
+                [f"{cond_str}#{i}" for i in range(bs)], dtype=object
+            )
             cap.set_per_cell({
-                "cell_id": torch.arange(cell_offset, cell_offset + bs),
+                "cell_id": cell_ids,
+                "cell_index": torch.arange(cell_offset, cell_offset + bs),
                 "condition": np.array([cond_str] * bs, dtype=object),
             })
             cap.run(jnp.asarray(source_x), cond_emb, enc_noise)

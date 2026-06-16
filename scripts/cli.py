@@ -21,8 +21,20 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
     p.add_argument(
         "--split",
         default="test",
-        choices=["train", "val", "test"],
-        help="which split to emit predictions for",
+        choices=["train", "val", "test", "sample"],
+        help="which split to emit predictions for; 'sample' is a balanced "
+        "sub-sample built per-loader (used for activation collection)",
+    )
+    p.add_argument(
+        "--sample-by",
+        default="cell_line,gene",
+        help="comma-separated obs columns to bucket on for --split sample",
+    )
+    p.add_argument(
+        "--sample-n-per-bucket",
+        type=int,
+        default=50,
+        help="greedy cap of cells per bucket for --split sample",
     )
     p.add_argument(
         "--output",
@@ -72,6 +84,11 @@ def common_parser(description: str | None = None) -> argparse.ArgumentParser:
         help="if set, --activation-out is treated as a folder and the sink "
         "rotates into shard-NNNNN.h5 files every N batches; default is a "
         "single .h5 file",
+    )
+    p.add_argument(
+        "--capture-layers",
+        default="all",
+        help="comma-separated exact capture point names; 'all' captures every wired point",
     )
     wb.add_args(p)
     return p

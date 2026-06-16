@@ -1,0 +1,8 @@
+defaults:
+  - method: ???
+  - pair: ???
+  - capture: layer_11
+  - _self_
+
+mode: x
+out_dir: predictions/diff/${pair.name}/${method.name}/${capture.label}

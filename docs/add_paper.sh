@@ -28,7 +28,7 @@ fi
 
 source "$DOCS_DIR/.venv/bin/activate"
 echo "==> converting to markdown"
-docling --to md --output "$PAPERS_DIR" "$PDF"
+docling --to md --image-export-mode referenced --output "$PAPERS_DIR" "$PDF"
 
 echo "==> done"
 ls -la "$PAPERS_DIR/$NAME".*

@@ -6,7 +6,7 @@
 	url = https://github.com/theislab/cellflow.git
 [submodule "models/scgpt"]
 	path = models/scgpt
-	url = https://github.com/bowang-lab/scGPT.git
+	url = https://github.com/mattshu0410/scGPT.git
 	ignore = dirty
 [submodule "models/gears"]
 	path = models/gears

@@ -2,28 +2,19 @@
 # Setup environment for scGPT (inference-only for perturbation prediction)
 # Called from the repo root: ./models/setup_scgpt.sh
 #
-# Upstream scgpt depends on torchtext.vocab, which has been archived. We carry
-# a torchtext-free GeneVocab replacement at models/scgpt_patches/gene_tokenizer.py
-# and overlay it into the submodule below — this lets us track upstream cleanly
-# and frees torch from the 2.3.0 pin, so nnsight installs without --no-deps.
-# scgpt itself is still installed --no-deps to bypass the scvi-tools<1.0 pin.
+# scgpt is installed --no-deps to bypass scvi-tools<1.0 / orbax<0.1.8 pins.
+# Torchtext-free GeneVocab is upstream as of cebd6fa (vocab_compat.py).
 
 set -euo pipefail
 
-PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scgpt_patches" && pwd)"
 MODEL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scgpt" && pwd)"
 cd "$MODEL_DIR"
 
 echo "==> Setting up scGPT environment..."
 
-# Overlay the gene_tokenizer.py shim onto the submodule. Idempotent — the cp
-# just rewrites the same bytes if already applied. Re-run this script after
-# any `git submodule update` to restore the patch (submodule update resets
-# the working tree).
-cp "$PATCH_DIR/gene_tokenizer.py" "$MODEL_DIR/scgpt/tokenizer/gene_tokenizer.py"
-echo "==> applied patch: scgpt/tokenizer/gene_tokenizer.py"
-
-uv venv --python 3.11 --clear .venv
+# Pin to 3.11.9: cpython-3.11.15 (Clang 22.1.3) has a for-loop variable
+# scoping bug that breaks inspect.cleandoc and scipy._docscrape at import time.
+uv venv --python 3.11.9 --clear .venv
 source .venv/bin/activate
 
 uv pip install torch torchvision
@@ -31,15 +22,17 @@ uv pip install torch torchvision
 uv pip install \
     "numpy<2" \
     "pandas" \
-    "anndata" \
-    "scanpy" \
+    "anndata>=0.8,<0.10" \
+    "scanpy>=1.9.1,<1.10" \
     "scikit-misc" \
-    "numba" \
+    "numba>=0.56,<0.60" \
     "umap-learn" \
     "leidenalg" \
     "ipython" \
     "datasets" \
-    "wandb"
+    "wandb" \
+    "scipy<1.17" \
+    "matplotlib>=3.7,<3.9"
 
 # Pinned to 0.1.2 to match tools/.venv: scgpt and the materialiser share
 # data/<dataset>/cell_graphs.pkl, and the on-disk Data layout differs across
